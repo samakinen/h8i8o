@@ -381,6 +381,10 @@ int main() {
         board_restart();
     }
     auto app = std::move(started.value());
+    // The stack's own clock. Without it the coalesced configuration save never
+    // falls due, and a change that ends without a restart (an individual
+    // address, a property write) reaches flash only at the next restart.
+    app->setTimeSource([]() -> uint32_t { return board_millis(); });
     loadConfig(app->parameters());
     g_inputs.stable = g_inputs.candidate = readLogicalInputs();
     g_flashLog.setEraseGuard(backend);
