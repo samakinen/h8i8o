@@ -13,13 +13,15 @@
  * backend, as FlashLog's erase guard, puts the TP-UART2 in busy mode for it
  * (docs/firmware.md).
  *
- * RTT commands (one character each, on the RTT terminal):
+ * RTT commands (on the RTT terminal; all but b are one character):
  *   p  toggle programming mode (as the button does)
  *   s  print statistics
  *   i  print the raw input levels
  *   1-8 toggle that output locally and send its status
  *   a  print the individual address, device serial, lifecycle state and trace drops
  *   R  restart
+ *   b<area>.<line>.<device>,<count>,<gap ms>;  send that many A_DeviceDescriptor_Read
+ *      to the device (a bus test generator, see stepBurst); x stops it
  *
  * Every octet on the host link is logged too (printTrace), one line per burst.
  */
@@ -41,6 +43,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <type_traits>
 #include <utility>
 
@@ -280,6 +283,8 @@ void printBackend(const knx::physical::TpUartMediumBackend& backend) {
 // it, with the burst's start time in ms modulo 16384. The once-a-second state
 // poll (tx 02, rx 07) is left out.
 
+bool g_statePollOutstanding = false;  // a U_State.req left out of the trace awaits its answer
+
 struct TraceBurst {
     uint8_t octets[96];
     uint32_t count{0};
@@ -290,7 +295,18 @@ struct TraceBurst {
     void flush() {
         if (!open) return;
         open = false;
-        if (count == 1u && ((tx && octets[0] == 0x02u) || (!tx && octets[0] == 0x07u))) return;
+        // The once-a-second U_State poll is left out: the U_State.req (02h) and
+        // the 07h that answers it. A lone 07h is only that answer if a request
+        // is outstanding; otherwise it is part of a frame split over two
+        // bursts (the mask version 07B0h, say, while our own frame is fed).
+        if (count == 1u && tx && octets[0] == 0x02u) {
+            g_statePollOutstanding = true;
+            return;
+        }
+        if (count == 1u && !tx && octets[0] == 0x07u && g_statePollOutstanding) {
+            g_statePollOutstanding = false;
+            return;
+        }
         Line line = rlog();
         line << (tx ? "tx " : "rx ") << ms << ":";
         for (uint32_t i = 0; i < count && i < sizeof octets; ++i) {
@@ -323,6 +339,94 @@ void printTrace() {
 
 void printAddress(const char* what, uint16_t address) {
     rlog() << what << (address >> 12) << "." << ((address >> 8) & 0xFu) << "." << (address & 0xFFu);
+}
+
+// Bus test generator. Sends A_DeviceDescriptor_Read (connectionless) to one
+// device, `count` times, `gap` ms apart, each send waiting for the TP-UART2's
+// confirmation. With gap 0 the next request leaves while the target is still
+// answering the last one, so both devices contend for the bus. The answers
+// are not counted here: the host link trace shows them, with the repeat flag.
+//
+//   b<area>.<line>.<device>,<count>,<gap ms>;   e.g. b1.1.3,100,0;
+//   x  stop a running burst
+struct BusBurst {
+    bool active = false;
+    uint16_t target = 0;
+    uint32_t total = 0, sent = 0, gapMs = 0, lastMs = 0, startMs = 0;
+    uint32_t ok = 0, busy = 0, failed = 0, timeout = 0, other = 0;
+};
+BusBurst g_busTest;
+
+struct CommandLine {
+    bool collecting = false;
+    char text[24] = {};
+    size_t length = 0;
+};
+CommandLine g_command;
+
+bool parseNumber(const char*& p, uint32_t& value, uint32_t max) {
+    if (*p < '0' || *p > '9') return false;
+    value = 0;
+    while (*p >= '0' && *p <= '9') {
+        value = value * 10u + static_cast<uint32_t>(*p++ - '0');
+        if (value > max) return false;
+    }
+    return true;
+}
+
+bool parseBurst(const char* p, BusBurst& burst) {
+    uint32_t area = 0, line = 0, device = 0, count = 0, gap = 0;
+    if (!parseNumber(p, area, 15) || *p++ != '.' || !parseNumber(p, line, 15) || *p++ != '.' ||
+        !parseNumber(p, device, 255) || *p++ != ',' || !parseNumber(p, count, 60000) || *p++ != ',' ||
+        !parseNumber(p, gap, 60000) || *p != '\0' || count == 0) {
+        return false;
+    }
+    burst = BusBurst{};
+    burst.target = static_cast<uint16_t>((area << 12) | (line << 8) | device);
+    burst.total = count;
+    burst.gapMs = gap;
+    return true;
+}
+
+void printBurst(const char* what) {
+    rlog() << what << g_busTest.sent << "/" << g_busTest.total << " in " << (board_millis() - g_busTest.startMs)
+           << " ms: ok " << g_busTest.ok << ", busy " << g_busTest.busy << ", failed " << g_busTest.failed
+           << ", timeout " << g_busTest.timeout << ", other " << g_busTest.other;
+}
+
+template <typename App>
+void stepBurst(App& app) {
+    if (!g_busTest.active || app.lifecycleState() != DeviceLifecycleState::Operational) return;
+    if (g_busTest.sent != 0u && board_millis() - g_busTest.lastMs < g_busTest.gapMs) return;
+
+    knx::datalink::LDataFrame frame;
+    frame.source = app.individualAddress();
+    frame.destination = knx::GroupAddress(g_busTest.target);
+    frame.destinationType = knx::AddressType::Individual;
+    frame.priority = knx::Priority::System;
+    frame.hopCount = 6;
+    static constexpr uint8_t kDeviceDescriptorRead[] = {0x03, 0x00};  // T_Data_Individual, A_DeviceDescriptor_Read type 0
+    frame.tpdu.assign(std::span<const uint8_t>(kDeviceDescriptorRead));
+
+    if (g_busTest.sent == 0u) g_busTest.startMs = board_millis();
+    const auto result = app.link().sendFrame(frame);
+    g_busTest.lastMs = board_millis();
+    ++g_busTest.sent;
+    if (result.isOk()) {
+        ++g_busTest.ok;
+    } else if (result.error() == knx::util::ErrorCode::Busy) {
+        ++g_busTest.busy;
+    } else if (result.error() == knx::util::ErrorCode::TransmissionFailed) {
+        ++g_busTest.failed;
+    } else if (result.error() == knx::util::ErrorCode::Timeout) {
+        ++g_busTest.timeout;
+    } else {
+        ++g_busTest.other;
+    }
+    if (g_busTest.sent >= g_busTest.total) {
+        g_busTest.active = false;
+        printBurst("burst done ");
+    }
 }
 
 }  // namespace
@@ -409,6 +513,7 @@ int main() {
             lastAddress = address;
             printAddress("address now ", address);
         }
+        stepBurst(*app);
 
         const uint32_t now = board_millis();
         if (now != lastTick) {
@@ -451,8 +556,35 @@ int main() {
             }
         }
 
-        if (const int c = rtt_read_char(); c >= 0) {
-            if (c == 'p') {
+        if (const int c = rtt_read_char(); c >= 0 && g_command.collecting) {
+            if (c == ';') {
+                g_command.collecting = false;
+                g_command.text[g_command.length] = '\0';
+                if (parseBurst(g_command.text, g_busTest)) {
+                    g_busTest.active = true;
+                    Line line = rlog();
+                    line << "burst to " << (g_busTest.target >> 12) << "." << ((g_busTest.target >> 8) & 0xFu) << "."
+                         << (g_busTest.target & 0xFFu) << ": " << g_busTest.total << " requests, gap " << g_busTest.gapMs
+                         << " ms";
+                } else {
+                    rlog() << "usage: b<area>.<line>.<device>,<count>,<gap ms>;";
+                }
+            } else if (g_command.length + 1u < sizeof(g_command.text)) {
+                g_command.text[g_command.length++] = static_cast<char>(c);
+            } else {
+                g_command.collecting = false;
+                rlog() << "usage: b<area>.<line>.<device>,<count>,<gap ms>;";
+            }
+        } else if (c >= 0) {
+            if (c == 'b') {
+                g_command = CommandLine{};
+                g_command.collecting = true;
+            } else if (c == 'x') {
+                if (g_busTest.active) {
+                    g_busTest.active = false;
+                    printBurst("burst stopped ");
+                }
+            } else if (c == 'p') {
                 app->toggleProgrammingMode();
             } else if (c == 's') {
                 printBackend(*backend);

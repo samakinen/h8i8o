@@ -98,8 +98,7 @@ Programming (writing half-words) is short and runs from flash with interrupts en
 
 ## Diagnostics over RTT
 
-The firmware logs over SEGGER RTT through the debug probe, and takes one-character
-commands. `tools/scripts/rtt_console.sh` records the log and sends commands; any RTT client
+The firmware logs over SEGGER RTT through the debug probe, and takes short commands. `tools/scripts/rtt_console.sh` records the log and sends commands; any RTT client
 on OpenOCD's RTT server works as well.
 
 ```
@@ -114,6 +113,16 @@ tools/scripts/rtt_console.sh build/logs/session.log 30 "1:a 2:s"
 | `1`–`8` | Toggle that output locally and send its status |
 | `a` | Individual address, KNX serial number, lifecycle state |
 | `R` | Restart |
+| `b<area>.<line>.<device>,<count>,<gap ms>;` | Bus test: send `count` A_DeviceDescriptor_Read to that device, `gap` ms apart, each after the TP-UART2 has confirmed the last; then print how many were confirmed, refused busy, failed or timed out |
+| `x` | Stop a running bus test |
+
+**Bus test.** `b1.1.3,200,100;` checks another device's receiver and transmitter: it has
+to acknowledge 200 requests and answer each. With a gap of 0 the next request is fed while
+the device is still answering, so the two compete for the bus. The answers are counted by
+the statistics (`tpuart rx`); a repeated answer or a damaged one shows in the trace and in
+the octet and checksum error counters. A long run at gap 0 produces more trace than RTT
+carries, so use the counters there. The requests come from the device's own address and
+are not part of its application.
 
 Log lines start with the time since boot in seconds. Besides the commands' output the log
 shows the reset cause and the stored address at start, lifecycle changes, parameter
@@ -121,7 +130,7 @@ downloads, input and output changes, and raw input level changes.
 
 **Host link trace.** Every octet between the MCU and the TP-UART2 is logged, one line per
 burst: `rx <ms>: …` from the chip, `tx <ms>: …` to it, where `<ms>` is the burst's start
-time modulo 16,384. The once-a-second `U_State` poll is left out. A burst ends after 2 ms
+time modulo 16,384. The once-a-second `U_State` poll and its answer are left out. A burst ends after 2 ms
 without an octet, so a frame can be split over two lines.
 
 Expected at every start: one unexpected octet and one USART receive error, from the
