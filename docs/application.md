@@ -53,6 +53,9 @@ An input is active when its pin is pulled to ground; see [hardware.md](hardware.
   including one that does not change the state. With "Disabled" it is never sent but still
   answers reads.
 - **Disabled channel.** Switch telegrams are ignored and the output stays released.
+- **When bus power fails**, the outputs keep their state until the supply gives out, about
+  120 ms later with every output off and less with loads on the outputs
+  ([hardware.md](hardware.md#observed-behaviour-of-the-parts)).
 - **At start**, after a restart or a bus power cut, every output is released (pin low). The
   previous state is not restored, and no status is sent. A channel in "Normally closed" mode
   therefore reads as on after a start.

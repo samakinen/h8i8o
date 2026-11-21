@@ -161,6 +161,11 @@ The module's hardware allows considerably more than this firmware does. Candidat
 - **Output functions**: switch-on and switch-off delays, staircase timer, lock and forced
   control, behaviour after bus power failure, recovery and ETS download, restoring the
   state after a power cut, a central switch object, scenes, an inverted or cyclic status.
+- **Bus power failure**: switch every active output off as soon as the TP-UART2's `SAVE`
+  warns of it (the firmware already takes that warning from an interrupt, ahead of the
+  20 ms debounce). Loads such as LEDs on the outputs then stop draining the capacitors,
+  which lengthens the time left to store state before the supply gives out (122 ms measured
+  with every output off; see [docs/hardware.md](docs/hardware.md#observed-behaviour-of-the-parts)).
 - **Device**: factory reset by a long press of the button, a programming-mode timeout, LED
   patterns for "not loaded" and "transceiver not ready", an "in operation" heartbeat
   object.

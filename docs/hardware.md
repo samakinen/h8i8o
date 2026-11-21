@@ -90,6 +90,16 @@ our board: DPIDR `0x1ba01477`, CPUID `0x412fc231` (Cortex-M3 r2p1), DBGMCU_IDCOD
 - Once it has an individual address, the chip acknowledges every group telegram on the line
   by itself, as most KNX devices do.
 
+**Bus power loss.** The board has no supply other than the bus. With the bus disconnected:
+
+- `SAVE` falls at once. Pulling the plug roughly can make it bounce for about 40 ms before it
+  stays low; the firmware's 20 ms debounce rides that out.
+- The MCU keeps running for 122–123 ms after `SAVE` falls, on the capacitors alone. That
+  figure was measured with every output off and the debug probe attached (its SWD lines may
+  feed the MCU a little), over RTT polled every millisecond. An active output that drives a
+  load, an LED for example, draws from the same capacitors and shortens it.
+- A dip that ends within that time does not reset the device.
+
 **GD32F103 flash.** Measured with the core at 8 MHz:
 
 - A 1 KiB page erase takes 37–39 ms; programming a half-word takes about 100 µs.
