@@ -8,12 +8,16 @@
  * The debug clocks are kept on in sleep and the watchdog is frozen while the
  * core is halted, so the probe can attach at any time (without DBG_SLEEP the
  * core in WFI stops the clock the debug port needs).
+ *
+ * The stack reserve (link.ld) is painted with a pattern at reset, so
+ * startup_stack_peak() can tell how deep the stack has been since.
  */
 #include <stdint.h>
 
 #include "board.h"
 
 extern uint32_t _sidata, _sdata, _edata, _sbss, _ebss, _estack;
+extern char _heap_limit; /* link.ld; char, as startup/syscalls.c declares it */
 extern void (*__preinit_array_start[])(void);
 extern void (*__preinit_array_end[])(void);
 extern void (*__init_array_start[])(void);
@@ -21,6 +25,29 @@ extern void (*__init_array_end[])(void);
 int main(void);
 
 #define REG(addr) (*(volatile uint32_t *)(addr))
+
+#define STACK_PAINT 0xC5ACCE55u
+
+/* Everything below the current stack pointer, down to the heap limit. */
+static void paint_stack(void)
+{
+    uint32_t *sp;
+    __asm volatile("mov %0, sp" : "=r"(sp));
+    for (volatile uint32_t *p = (uint32_t *)&_heap_limit; p < sp - 16; ++p) {
+        *p = STACK_PAINT;
+    }
+}
+
+uint32_t startup_stack_peak(void)
+{
+    const volatile uint32_t *p = (const uint32_t *)&_heap_limit;
+    while (p < &_estack && *p == STACK_PAINT) {
+        ++p;
+    }
+    return (uint32_t)((uintptr_t)&_estack - (uintptr_t)p);
+}
+
+uint32_t startup_stack_reserve(void) { return (uint32_t)((uintptr_t)&_estack - (uintptr_t)&_heap_limit); }
 
 void Reset_Handler(void)
 {
@@ -35,6 +62,8 @@ void Reset_Handler(void)
 
     /* 2. Debug: clocks on in sleep/stop/standby, watchdog frozen while halted. */
     REG(0xE0042004u) |= (1u << 0) | (1u << 1) | (1u << 2) | (1u << 8);
+
+    paint_stack();
 
     /* 3. C runtime. .data holds .ramfunc (the flash erase wait). */
     for (uint32_t *s = &_sidata, *d = &_sdata; d < &_edata;) {

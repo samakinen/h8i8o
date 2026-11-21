@@ -10,23 +10,35 @@ How the firmware is built and how it runs. For what it does on the bus, see
 | `app/product.hpp` | The product: communication objects, parameters, identity. Both the firmware and the ETS product file are built from it |
 | `app/main.cpp` | Start-up, the main loop, the input and output logic, RTT diagnostics |
 | `bsp/board.c` | Clock, GPIO, time base, unique ID, watchdog, reset. Pin polarities are the constants in `board.h` |
-| `bsp/usart1.c` | USART1 to the TP-UART2, as KNstaX's `knx_uart_hal_t`, with an octet trace |
+| `bsp/usart1.c` | USART1 to the TP-UART2, as KNstaX's `knx_uart_hal_t`, with an optional octet trace |
 | `bsp/gd32_fmc.c` | The flash driver for persistence, as KNstaX's `knx_flash_hal_t` |
 | `bsp/rtt.c` | A minimal SEGGER RTT implementation: one channel out, one in |
-| `startup/` | Vector table, `Reset_Handler`, newlib system calls, linker script |
+| `startup/` | Vector table, `Reset_Handler` (with the stack paint), newlib system calls, linker script |
+| `knx.defconfig` | KNstaX configuration on top of its profile: capacities and APDU length, for the firmware and the product file |
 | `external/KNstaX` | The KNX stack, as a git submodule |
 | `tools/knxprod` | Host build of the ETS product file from `app/product.hpp` |
 
 Everything is register-level C and C++23; there is no vendor HAL. KNstaX is built with its
-`tp1-small` profile: TP1 only, 128 group addresses, 160 associations, APDU length 15.
+`tp1-small` profile and `knx.defconfig` on top: TP1 only, 64 group addresses, 96
+associations, APDU length 55 (extended frames, which KNX Data Secure needs). The product
+file is built with the same `knx.defconfig`, so it declares what the firmware implements.
+
+Build options (`cmake -D<option>=ON`):
+
+| Option | Default | Effect |
+|---|---|---|
+| `H8I8O_TRACE` | `OFF` | The host link trace (below): every octet to and from the TP-UART2 over RTT. Costs about 3.2 KiB of RAM (the trace ring and a 2 KiB RTT buffer instead of 512 B) |
+| `H8I8O_LTO` | `ON` | Link-time optimisation |
 
 ## Execution model
 
-No RTOS: one main loop and two interrupts.
+No RTOS: one main loop and three interrupts.
 
 - **USART1 receive.** Feeds every octet from the TP-UART2 to the KNstaX TP-UART backend,
   which assembles frames and answers each group telegram addressed to the device with
   `U_AckInformation` before the chip's deadline.
+- **SAVE edge.** The TP-UART2 warns that the bus voltage is failing: every output is
+  released at once (see "Bus power failure" below).
 - **SysTick, 1 ms.** The time base. Higher priority than USART1, so time stamps in the
   receive path are current.
 - **Main loop.** Runs the KNstaX stack, the flash log's background step, the input scan and
@@ -36,15 +48,18 @@ No RTOS: one main loop and two interrupts.
 ## Start-up
 
 1. `Reset_Handler` drives DO1–DO8 low (inactive) before anything else: before the clock
-   set-up, `.data` and C++ constructors. It also keeps the debug clocks on in sleep and
-   freezes the watchdog while the core is halted.
+   set-up, `.data` and C++ constructors. It also keeps the debug clocks on in sleep,
+   freezes the watchdog while the core is halted, and paints the stack reserve with a
+   pattern, so the deepest the stack has been can be read later (`s`).
 2. The clock goes to 48 MHz (internal 8 MHz oscillator, /2 × 12, one flash wait state).
    USART1 runs at 19200 baud from it (divider 2500, exact).
 3. The flash log is mounted, and any erase that a reset interrupted is finished before the
    stack's first save.
 4. KNstaX starts: the TP-UART2 is reset and given the stored individual address, and the
    stored tables and parameters are loaded.
-5. The heap is locked (no allocation after start), and the watchdog starts with about 1 s
+5. The outputs whose "State after a restart" is "As before" are set to their stored switch
+   values, and their status objects are sent once the device is operational.
+6. The heap is locked (no allocation after start), and the watchdog starts with about 1 s
    timeout. It is fed only from the main loop.
 
 The device is on the bus about 15 ms after reset.
@@ -57,15 +72,23 @@ The device is on the bus about 15 ms after reset.
 | Flash | `0x0801_E000` | 8 KiB | Persistence: two banks of four 1 KiB pages |
 | RAM | `0x2000_0000` | 20 KiB | `.data` (with the flash erase routine), `.bss`, heap, 2.5 KiB stack at the top |
 
-Use in this release: image 96,512 B (79 % of the 120 KiB region), static RAM 5,584 B,
-heap after start about 10.5 KiB. The linker script stops the image from growing into the
+Use in this release: image 94,464 B (77 % of the 120 KiB region), static RAM 1,208 B
+(4,360 B with `H8I8O_TRACE`). The heap after start and the stack peak are measured on the
+board: `s` prints both. The linker script stops the image from growing into the
 persistence pages, and `_sbrk` refuses to grow the heap into the stack reserve.
 
 ## Persistence
 
 KNstaX's `FlashLog` keeps a log-structured store in the persistence pages: a CRC on every
 record, and compaction into the other bank when one fills. It holds the individual address,
-the group address and association tables and the parameters. Output states are not stored.
+the group address and association tables and the parameters, and one record of the
+firmware's own: the outputs' switch values, under KNstaX's first product key
+(`kProductKeyIdFirst`, 0x7F00), which the stack never uses.
+
+The output record is written when `SAVE` warns of a bus power failure and before a planned
+restart (after an ETS download, `R`), and only when it changed. A reset without warning
+(the watchdog, a fault, a power cut `SAVE` did not report) finds the last record. A factory
+reset erases it.
 
 A record that a reset or power cut interrupts is detected by its CRC and ignored; the
 previous value stays valid. Saves take up to about 13 ms. A compaction copies every live
@@ -94,7 +117,7 @@ Programming (writing half-words) is short and runs from flash with interrupts en
 | Manufacturer ID | 0x00FA (KNstaX's example ID; see the README) |
 | Serial number | 0x00FA followed by 32 bits hashed (FNV-1a) from the MCU's 96-bit unique ID |
 | Mask version | 0x07B0 (System B) |
-| Application | number 1, version 2 |
+| Application | number 1, version 3 |
 
 ## Diagnostics over RTT
 
@@ -108,11 +131,11 @@ tools/scripts/rtt_console.sh build/logs/session.log 30 "1:a 2:s"
 | Command | Action |
 |---|---|
 | `p` | Toggle programming mode, as the button does |
-| `s` | Statistics: TP-UART frames, acknowledges, confirmations, errors, erases in busy mode, USART counters, heap high-water mark |
+| `s` | Statistics: TP-UART frames, acknowledges, confirmations, errors, erases in busy mode, USART counters, heap high-water mark, stack peak and reserve |
 | `i` | Raw input pin levels (DI1 first) and the button |
 | `1`–`8` | Toggle that output locally and send its status |
-| `a` | Individual address, KNX serial number, lifecycle state |
-| `R` | Restart |
+| `a` | Individual address, KNX serial number, lifecycle state (and trace drops with `H8I8O_TRACE`) |
+| `R` | Restart, storing the output states first |
 | `b<area>.<line>.<device>,<count>,<gap ms>;` | Bus test: send `count` A_DeviceDescriptor_Read to that device, `gap` ms apart, each after the TP-UART2 has confirmed the last; then print how many were confirmed, refused busy, failed or timed out |
 | `x` | Stop a running bus test |
 
@@ -128,7 +151,7 @@ Log lines start with the time since boot in seconds. Besides the commands' outpu
 shows the reset cause and the stored address at start, lifecycle changes, parameter
 downloads, input and output changes, and raw input level changes.
 
-**Host link trace.** Every octet between the MCU and the TP-UART2 is logged, one line per
+**Host link trace** (build option `H8I8O_TRACE`). Every octet between the MCU and the TP-UART2 is logged, one line per
 burst: `rx <ms>: …` from the chip, `tx <ms>: …` to it, where `<ms>` is the burst's start
 time modulo 16,384. The once-a-second `U_State` poll and its answer are left out. A burst ends after 2 ms
 without an octet, so a frame can be split over two lines.
@@ -144,13 +167,46 @@ shows:
 | Line | Meaning |
 |---|---|
 | `link Up`, `link Down`, `link Degraded` | The stack's link state: `SAVE` debounced, the chip's answers to `U_State`, its temperature warning |
-| `power fail warning (SAVE edge)` | `SAVE` fell; from the edge interrupt, ahead of the debounce |
+| `power fail warning (SAVE edge), outputs released` | `SAVE` fell; from the edge interrupt, ahead of the debounce |
+| `output states stored (power fail) <bits>` | The switch values went to flash (only when they changed since the last record) |
 | `pf <ms>` | Every millisecond while `SAVE` stays low: time since it fell |
-| `SAVE released` | `SAVE` is high again |
+| `SAVE released, outputs back` | The bus came back before the supply gave out; the outputs return to their switch values |
+| `SAVE released` | `SAVE` is high again (it was low at start, without an edge) |
 
 The last `pf` line the host receives after the bus is disconnected is how long the device
 runs on its capacitors, to within the host's RTT polling interval. The statistics (`s`)
 count the warnings (`pfw`).
+
+## Bus power failure
+
+The board runs from the bus, so the relays drop anyway once the capacitors are empty. The
+firmware gets ahead of that:
+
+1. The `SAVE` edge interrupt notes the output pins and releases every output. The loads stop
+   drawing on the capacitors, which leaves more time for step 2 (122 ms was measured with
+   every output off; see [hardware.md](hardware.md#observed-behaviour-of-the-parts)).
+2. The main loop stores the outputs' switch values (Persistence, above) and asks KNstaX to
+   save its own power-fail state (`requestPowerFailSave()`; with Data Secure, the sequence
+   numbers).
+3. If `SAVE` goes high again before the supply gives out, the outputs return to their switch
+   values. A switch command that arrives meanwhile is refused and logged.
+
+## Programming button
+
+| Press | Effect |
+|---|---|
+| Short | Toggles programming mode (on the press). The LED shows it |
+| Held 10 s | The LED flashes fast: released now, the device does a factory reset |
+| Held 15 s | Nothing: the factory reset is not armed any more, and the LED shows programming mode again |
+
+The factory reset is KNstaX's `factoryReset()`: what ETS's Master Reset with erase code 02h
+does (individual address 15.15.255, empty tables, default parameters, the authorisation
+and Data Secure keys back to ex-factory), then a restart. It is not a flash erase: a Master
+Reset keeps the Data Secure sending sequence number, which a secured device must never reuse.
+The firmware also erases its output record. The first press of the hold toggles programming
+mode, as any press does; the restart clears it.
+
+Programming mode ends by itself after 15 minutes, however it was turned on.
 
 ## Changing the firmware
 

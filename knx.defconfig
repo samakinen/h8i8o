@@ -1,0 +1,14 @@
+# H8i8o: KNstaX configuration on top of a profile (tp1-small for the
+# firmware, host-minimal for the product file). Both builds apply this file,
+# so the product file declares what the firmware implements. Changing a value
+# here changes the product: raise applicationVersion in app/product.hpp.
+
+# 24 group objects: 64 group addresses and 96 associations are plenty, and the
+# tables, their load segments and the persistence scratch shrink with them.
+CONFIG_KNX_ADDRESS_TABLE_ENTRIES=64
+CONFIG_KNX_ASSOCIATION_TABLE_ENTRIES=96
+
+# Extended frames: 55 is the most a 64-octet TP-UART2 frame carries, and what
+# KNX Data Secure needs to write a key table entry in one frame
+# (docs/data-secure.md). app/product.hpp declares the same maxApduLength.
+CONFIG_KNX_MAX_APDU_LENGTH=55

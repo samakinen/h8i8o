@@ -42,12 +42,17 @@ h8i8o_usart1_stats_t h8i8o_usart1_stats(void);
  *   0x00nn                             one octet of the burst
  * Read from the main loop; the interrupt writes. When the ring is full, new
  * entries are dropped and counted. */
+#ifndef H8I8O_TRACE
+#define H8I8O_TRACE 0 /* the build option of the same name (CMakeLists.txt) */
+#endif
+#if H8I8O_TRACE
 #define H8I8O_USART1_TRACE_ENTRIES 768u
 #define H8I8O_USART1_TRACE_MARK 0x8000u
 #define H8I8O_USART1_TRACE_TX 0x4000u
 
 size_t h8i8o_usart1_trace_read(uint16_t *out, size_t max);
 uint32_t h8i8o_usart1_trace_dropped(void);
+#endif
 
 #ifdef __cplusplus
 }

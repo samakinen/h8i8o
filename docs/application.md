@@ -25,6 +25,7 @@ One page per channel: "Input 1" to "Input 8" and "Output 1" to "Output 8".
 | Output *n* | Channel | Disabled / Enabled | Enabled | always |
 | | Operating mode | Normally open (1 = energise) / Normally closed (1 = de-energise) | Normally open | while the channel is Enabled |
 | | Status object | Disabled / Send on change | Send on change | while the channel is Enabled |
+| | State after a restart | Released / As before the restart or bus power failure | Released | while the channel is Enabled |
 
 New parameters take effect when the download completes, without a restart.
 
@@ -53,20 +54,28 @@ An input is active when its pin is pulled to ground; see [hardware.md](hardware.
   including one that does not change the state. With "Disabled" it is never sent but still
   answers reads.
 - **Disabled channel.** Switch telegrams are ignored and the output stays released.
-- **When bus power fails**, the outputs keep their state until the supply gives out, about
-  120 ms later with every output off and less with loads on the outputs
-  ([hardware.md](hardware.md#observed-behaviour-of-the-parts)).
-- **At start**, after a restart or a bus power cut, every output is released (pin low). The
-  previous state is not restored, and no status is sent. A channel in "Normally closed" mode
-  therefore reads as on after a start.
+- **When bus power fails**, every output is released at once, as soon as the transceiver
+  warns of it, and the outputs' switch values are stored. The board runs from the bus, so the
+  outputs would drop anyway when the supply gives out; releasing them first leaves the
+  device time to store its state. If the bus comes back before the supply gives out, the
+  outputs return to their switch values.
+- **State after a restart** (after an ETS download, a bus power cut or any other restart):
+  - "Released": the output is released (pin low), and no status is sent. A channel in
+    "Normally closed" mode therefore reads as on.
+  - "As before the restart or bus power failure": the output takes the switch value it had,
+    and its status is sent once the device runs. The value is stored when the bus power
+    fails and before a planned restart; after an unplanned reset (the watchdog, say) the
+    output takes the last stored value.
 
 ## Programming button and LED
 
 - A press of the programming button toggles programming mode. Press it **once** when ETS
   asks: a second press ends programming mode before ETS has written the address.
 - The LED is on while programming mode is on, and off otherwise.
-- Programming mode stays on until the button is pressed again or the device restarts; it has
-  no timeout.
+- Programming mode ends when the button is pressed again, when the device restarts, or by
+  itself after 15 minutes.
+- **Factory reset**: hold the button for 10 seconds, until the LED flashes fast, and release
+  it while it flashes (within 5 seconds). Held longer, nothing happens.
 
 ## Commissioning with ETS6
 
@@ -85,6 +94,20 @@ ID 0x00FA, as explained in the [README](../README.md#status-and-limitations).
 
 ### Factory reset
 
-There is no factory reset by button. To return the device to its factory state (address
-15.15.255, no tables, no parameters), erase the whole flash with the debug probe and program
-the firmware again ([README](../README.md#flash-the-board)).
+Hold the programming button for 10 seconds and release it while the LED flashes fast. The
+device returns to its factory state and restarts: address 15.15.255, no group addresses or
+associations, default parameters. It is the reset ETS does with a Master Reset (erase code
+02h), so it keeps what that keeps, such as the KNX Data Secure sequence number.
+
+Erasing the whole flash with the debug probe and programming the firmware again also works
+([README](../README.md#flash-the-board)), but it is not the same for a device that will use
+KNX Data Secure: it loses that sequence number too.
+
+### Updating from application version 2
+
+Version 3 adds the "State after a restart" parameter, halves the group address and
+association capacity (64 and 96), and uses extended frames (APDU length 55). Import the new
+product file, change the device's application program in the ETS project to version 3,
+and download it. Until then the device keeps its individual address and tables but starts
+with default parameters, because the stored ones are of the old layout. A device linked to
+more than 64 group addresses, or with more than 96 associations, does not fit version 3.

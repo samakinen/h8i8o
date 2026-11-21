@@ -76,6 +76,7 @@ static inline void irq_restore(uint32_t primask) { __asm volatile("msr primask, 
 
 static uint32_t tx_used(void) { return (g_tx_head - g_tx_tail) % H8I8O_USART1_TX_RING; }
 
+#if H8I8O_TRACE
 /* Octet trace; see usart1.h. Written only from the interrupt. */
 static uint16_t g_trace[H8I8O_USART1_TRACE_ENTRIES];
 static volatile uint32_t g_trace_head; /* written by the interrupt */
@@ -122,6 +123,9 @@ size_t h8i8o_usart1_trace_read(uint16_t *out, size_t max)
 }
 
 uint32_t h8i8o_usart1_trace_dropped(void) { return g_trace_dropped; }
+#else
+static inline void trace_octet(uint8_t octet, uint32_t dir) { (void)octet; (void)dir; }
+#endif
 
 void USART1_IRQHandler(void)
 {

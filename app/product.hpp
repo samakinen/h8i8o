@@ -11,8 +11,12 @@
  *
  * Parameters, declared with KNstaX's parameter layout: per input the function
  * (Disabled or Switch), the contact type and the debounce time; per output the
- * channel, the operating mode and the status object. docs/application.md
- * describes them for ETS users.
+ * channel, the operating mode, the status object and the state after a
+ * restart. docs/application.md describes them for ETS users.
+ *
+ * The capacities the product file declares (group addresses, associations,
+ * APDU length) come from knx.defconfig, which the firmware and the product
+ * file build both apply.
  *
  * Bump PersistencePolicy::schemaVersion whenever a port is added, removed or
  * reordered: the stored layout is positional.
@@ -58,6 +62,7 @@ enum class DebounceTime : uint8_t { Ms10 = 10, Ms20 = 20, Ms30 = 30, Ms50 = 50, 
 enum class ChannelUse : uint8_t { Disabled = 0, Enabled = 1 };
 enum class OperatingMode : uint8_t { NormallyOpen = 0, NormallyClosed = 1 };
 enum class StatusObject : uint8_t { Disabled = 0, OnChange = 1 };
+enum class StartState : uint8_t { Released = 0, Restore = 1 };
 
 inline constexpr auto kInputFunctionOptions =
     params::options<InputFunction>({{InputFunction::Disabled, "Disabled"}, {InputFunction::Switch, "Switch"}});
@@ -73,9 +78,11 @@ inline constexpr auto kOperatingModeOptions = params::options<OperatingMode>(
      {OperatingMode::NormallyClosed, "Normally closed (1 = de-energise)"}});
 inline constexpr auto kStatusObjectOptions = params::options<StatusObject>(
     {{StatusObject::Disabled, "Disabled"}, {StatusObject::OnChange, "Send on change"}});
+inline constexpr auto kStartStateOptions = params::options<StartState>(
+    {{StartState::Released, "Released"}, {StartState::Restore, "As before the restart or bus power failure"}});
 
 enum class In : uint8_t { Function, Contact, Debounce };
-enum class Out : uint8_t { Channel, Mode, Status };
+enum class Out : uint8_t { Channel, Mode, Status, Start };
 
 // The default function is Switch, so every input sends after a download with
 // default parameters.
@@ -103,7 +110,11 @@ inline constexpr auto kOutputParameters = params::parameterBlock<Out>(
     params::param<Out::Status, StatusObject>({.name = "Status object",
                                               .def = StatusObject::OnChange,
                                               .options = kStatusObjectOptions,
-                                              .visible = params::when<Out::Channel>(ChannelUse::Enabled)}));
+                                              .visible = params::when<Out::Channel>(ChannelUse::Enabled)}),
+    params::param<Out::Start, StartState>({.name = "State after a restart",
+                                           .def = StartState::Released,
+                                           .options = kStartStateOptions,
+                                           .visible = params::when<Out::Channel>(ChannelUse::Enabled)}));
 
 inline constexpr auto kParameters =
     params::parameterLayout(params::repeat<kChannels>(kInputParameters), params::repeat<kChannels>(kOutputParameters));
@@ -140,9 +151,9 @@ inline constexpr auto kProduct = makeCommissionedProduct<kParameters>(
             .manufacturerId = ManufacturerId(0x00FA),  // KNstaX's example ID: not a registered product (README)
             .medium = endpoint::Medium::TP1,
             .applicationNumber = 1,
-            .applicationVersion = 2,  // bump when objects or parameters change
-            .firmwareRevision = 1,
-            .maxApduLength = 15,
+            .applicationVersion = 3,  // bump when objects, parameters or knx.defconfig change
+            .firmwareRevision = 2,
+            .maxApduLength = 55,      // CONFIG_KNX_MAX_APDU_LENGTH in knx.defconfig
         },
         PersistencePolicy{
             .namespacePrefix = "h8i8o",

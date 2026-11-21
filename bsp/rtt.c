@@ -5,7 +5,11 @@
 #include "rtt.h"
 
 #ifndef RTT_UP_SIZE
+#if H8I8O_TRACE
 #define RTT_UP_SIZE 2048u /* room for the host link trace during an ETS download */
+#else
+#define RTT_UP_SIZE 512u /* the log alone */
+#endif
 #endif
 #define RTT_DOWN_SIZE 16u
 

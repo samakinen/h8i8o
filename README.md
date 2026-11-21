@@ -14,8 +14,11 @@ and eight switching outputs.
   Per input: enabled or disabled, normally open or normally closed, debounce time 10–200 ms.
 - **8 outputs** (DO1–DO8), each with a switch object and a status object (DPT 1.001). Per
   output: enabled or disabled, normally open or normally closed operation, status sent on
-  change or not at all.
-- Programming button and LED.
+  change or not at all, released or restored after a restart or bus power failure.
+- Bus power failure: the outputs are released as soon as the TP-UART2 warns of it, and their
+  states are stored.
+- Programming button and LED. Programming mode ends by itself after 15 minutes; holding the
+  button for 10 seconds does a factory reset.
 - Safe start: the outputs are driven inactive first thing after reset.
 - Watchdog, and diagnostics over SEGGER RTT through the debug probe.
 
@@ -35,8 +38,8 @@ group telegrams. Before you use it, note that:
   pin map and are assumed to behave the same. The ratings of the input and output stages, and
   what the I/O board connects to them, are not characterised: check yours before connecting
   loads, especially mains loads.
-- Outputs are not restored after a restart or bus power cut; they start released.
-- No factory reset by button, and no programming-mode timeout.
+- Extended frames (application version 3, APDU length 55) are new on this board: check the
+  ETS download first if something fails.
 - Programming the firmware destroys the factory firmware for good (see below).
 
 ## Repository layout
@@ -44,6 +47,7 @@ group telegrams. Before you use it, note that:
 | Path | Content |
 |---|---|
 | `app/` | The product definition (`product.hpp`) and the application (`main.cpp`) |
+| `knx.defconfig` | KNstaX capacities and APDU length, for the firmware and the product file |
 | `bsp/`, `startup/` | Board support, start-up code and linker script |
 | `external/KNstaX/` | The KNX stack (git submodule) |
 | `docs/` | [Application](docs/application.md), [hardware](docs/hardware.md), [firmware internals](docs/firmware.md) |
@@ -92,6 +96,10 @@ docker run --rm -v "$PWD":/work -w /work h8i8o-arm sh -c \
 On Git Bash for Windows, prefix `docker run` with `MSYS_NO_PATHCONV=1`. The result is
 `build/fw/h8i8o.elf` (and `h8i8o.bin`, to be written at `0x08000000`).
 
+Add `-DH8I8O_TRACE=ON` to the first `cmake` for the host link trace: every octet between the
+MCU and the TP-UART2 in the RTT log, for diagnosing an ETS download. It costs about 3 KiB of
+RAM, so it is off by default ([docs/firmware.md](docs/firmware.md#diagnostics-over-rtt)).
+
 ## Flash the board
 
 Wire the probe to the `D C G V` pads, leaving `V` unconnected, and power the board from the
@@ -127,8 +135,10 @@ The script retries the attach, programs, verifies and starts the firmware. Progr
 leaves the persistence pages alone, so the device keeps its ETS configuration across
 firmware updates as long as the product's objects stay the same.
 
-**Back to factory state** (address 15.15.255, no configuration): erase the whole chip, then
-program the firmware again.
+**Back to factory state** (address 15.15.255, no configuration): hold the programming button
+for 10 seconds and release it while the LED flashes fast. Or erase the whole chip and program
+the firmware again; for a device that will use KNX Data Secure prefer the button, which keeps
+the secure sequence number ([docs/application.md](docs/application.md#factory-reset)).
 
 ```
 openocd <options above> -c "init; reset halt; stm32f1x mass_erase 0; shutdown"
@@ -163,20 +173,15 @@ The module's hardware allows considerably more than this firmware does. Candidat
   object per input; sending the state after bus voltage recovery, with a delay; cyclic
   sending.
 - **Output functions**: switch-on and switch-off delays, staircase timer, lock and forced
-  control, behaviour after bus power failure, recovery and ETS download, restoring the
-  state after a power cut, a central switch object, scenes, an inverted or cyclic status.
-- **Bus power failure**: switch every active output off as soon as the TP-UART2's `SAVE`
-  warns of it (the firmware already takes that warning from an interrupt, ahead of the
-  20 ms debounce). Loads such as LEDs on the outputs then stop draining the capacitors,
-  which lengthens the time left to store state before the supply gives out (122 ms measured
-  with every output off; see [docs/hardware.md](docs/hardware.md#observed-behaviour-of-the-parts)).
-- **Device**: factory reset by a long press of the button, a programming-mode timeout, LED
-  patterns for "not loaded" and "transceiver not ready", an "in operation" heartbeat
-  object.
+  control, "on" or "off" after bus voltage recovery and after an ETS download, a central
+  switch object, scenes, an inverted or cyclic status.
+- **Device**: LED patterns for "not loaded" and "transceiver not ready", an "in operation"
+  heartbeat object.
 - The DIAUX and AUX signals, once their electrical function is known.
-- KNX Data Secure. It fits the 128 KiB flash and 20 KiB RAM, after work on the stack and on
-  this firmware: [docs/data-secure.md](docs/data-secure.md).
-- A build without the RTT host-link trace, for a smaller image.
+- KNX Data Secure. It fits the 128 KiB flash and 20 KiB RAM; what is done and what is left
+  is in [docs/data-secure.md](docs/data-secure.md).
+- Moving the board support onto KNstaX's GD32F1 reference port (`ports/gd32f1`), which
+  covers the same MCU.
 - A registered manufacturer ID, for a product that can be distributed.
 
 ## Licence

@@ -19,9 +19,12 @@ endif()
 
 set(KNSTAX_DIR "${CMAKE_CURRENT_LIST_DIR}/external/KNstaX" CACHE PATH "KNstaX source tree")
 option(H8I8O_LTO "Link with -flto" ON)
+# Every octet between the MCU and the TP-UART2, over RTT. For diagnosing the
+# host link (an ETS download, say); it costs about 3.6 KiB of RAM.
+option(H8I8O_TRACE "Trace the host link over RTT" OFF)
 
 include(${KNSTAX_DIR}/cmake/knx_config.cmake)
-knx_configure(PROFILE tp1-small)
+knx_configure(PROFILE tp1-small OVERRIDES ${CMAKE_CURRENT_LIST_DIR}/knx.defconfig)
 add_subdirectory(${KNSTAX_DIR} knstax EXCLUDE_FROM_ALL)
 
 add_executable(h8i8o
@@ -34,6 +37,7 @@ add_executable(h8i8o
     app/main.cpp
 )
 target_include_directories(h8i8o PRIVATE bsp app)
+target_compile_definitions(h8i8o PRIVATE H8I8O_TRACE=$<IF:$<BOOL:${H8I8O_TRACE}>,1,0>)
 target_compile_features(h8i8o PRIVATE cxx_std_23)
 target_compile_options(h8i8o PRIVATE -g -Wall -Wextra)
 target_link_libraries(h8i8o PRIVATE knx_core)

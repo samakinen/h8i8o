@@ -20,8 +20,8 @@ docker run --rm -v "$PWD":/work -w /work knstax-host \
     sh -c "cmake -S tools/knxprod -B build/knxprod -G Ninja && cmake --build build/knxprod --target h8i8o_knxprod"
 ```
 
-Output: `build/knxprod/h8i8o.knxprod.xml`, application `M-00FA_A-0001-02` with 24 objects
-and 48 parameters on 16 pages.
+Output: `build/knxprod/h8i8o.knxprod.xml`, application `M-00FA_A-0001-03` with 24 objects
+and 56 parameters on 16 pages.
 
 ## Pack and sign
 
@@ -51,6 +51,8 @@ ETS treats a file with new objects or parameters as a new application program. R
 `applicationVersion` in `app/product.hpp`, rebuild, re-import, and change the device's
 application program in the ETS project.
 
-The exporter writes the table sizes from the build's KNstaX configuration. This project uses
-the `host-minimal` profile, which has the same capacities as the firmware's `tp1-small`
-(128 group addresses, 160 associations, APDU length 15); keep the two in step.
+The exporter writes the table sizes from the build's KNstaX configuration. This build uses
+the `host-minimal` profile with the repository's `knx.defconfig` on top, the same file the
+firmware applies to `tp1-small`, so the product file declares the firmware's capacities
+(64 group addresses, 96 associations). A change to `knx.defconfig` is a change of the
+product: raise `applicationVersion`.

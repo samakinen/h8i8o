@@ -3,11 +3,23 @@
  * @file main.cpp
  * @brief H8i8o firmware: KNstaX on the board, 8 inputs and 8 outputs
  *
- * One main loop plus two interrupts: USART1 receive (the TP-UART2's octets
- * and the acknowledge decision, in KNstaX's backend) and SysTick (1 ms). The
- * loop runs the stack, the flash log's background step, the input scan and
- * debounce, the programming button, the RTT command channel and the
- * watchdog, then sleeps until the next interrupt.
+ * One main loop plus three interrupts: USART1 receive (the TP-UART2's octets
+ * and the acknowledge decision, in KNstaX's backend), the TP-UART2's SAVE edge
+ * (bus power failing) and SysTick (1 ms). The loop runs the stack, the flash
+ * log's background step, the input scan and debounce, the programming button,
+ * the RTT command channel and the watchdog, then sleeps until the next
+ * interrupt.
+ *
+ * Programming button: a press toggles programming mode, which also ends by
+ * itself after 15 minutes. Held for 10 s the LED flashes fast; released while
+ * it flashes, the device does a factory reset (KNstaX's factoryReset(): what
+ * ETS's Master Reset 02h does). Held for 15 s, nothing happens.
+ *
+ * Bus power failure: SAVE releases every output at once, from the interrupt,
+ * so the loads stop draining the bus capacitors; the loop then stores the
+ * outputs' switch values in the flash log, for the outputs set to restore
+ * them. If the bus comes back before the supply gives out, the outputs return
+ * to their switch values.
  *
  * Flash erases: the FMC driver masks interrupts for the 37-39 ms erase and the
  * backend, as FlashLog's erase guard, puts the TP-UART2 in busy mode for it
@@ -18,12 +30,13 @@
  *   s  print statistics
  *   i  print the raw input levels
  *   1-8 toggle that output locally and send its status
- *   a  print the individual address, device serial, lifecycle state and trace drops
+ *   a  print the individual address, device serial, lifecycle state (and trace drops)
  *   R  restart
  *   b<area>.<line>.<device>,<count>,<gap ms>;  send that many A_DeviceDescriptor_Read
  *      to the device (a bus test generator, see stepBurst); x stops it
  *
- * Every octet on the host link is logged too (printTrace), one line per burst.
+ * Built with H8I8O_TRACE=ON, every octet on the host link is logged too
+ * (printTrace), one line per burst.
  */
 
 #include "product.hpp"
@@ -35,6 +48,7 @@
 
 #include "knx/objects/flash_log.hpp"
 #include "knx/objects/flash_log_persistence.hpp"
+#include "knx/objects/interface_object_manager.hpp"
 #include "knx/objects/object_persistence.hpp"
 #include "knx/physical/tpuart_medium_backend.hpp"
 #include "knx/platform/cooperative_platform.hpp"
@@ -46,8 +60,11 @@
 #include <span>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
-extern "C" std::size_t g_heap_high_water;  // startup/syscalls.c
+extern "C" std::size_t g_heap_high_water;        // startup/syscalls.c
+extern "C" uint32_t startup_stack_peak(void);     // startup/startup.c
+extern "C" uint32_t startup_stack_reserve(void);  // startup/startup.c
 
 using namespace h8i8o;
 
@@ -106,9 +123,10 @@ uint32_t hookMillis(void*) { return board_millis(); }
 uint64_t hookMicros(void*) { return board_micros(); }
 void hookIdle(void*) { asm volatile("wfi"); }
 uint32_t hookSerial(void*) { return board_serial_number(); }
+void restartDevice(const char* why);
 void hookRestart(void*) {
     rlog() << "restart requested by the stack";
-    board_restart();
+    restartDevice("restart");
 }
 void hookFatal(void*) {
     rlog() << "fatal error in the stack";
@@ -137,6 +155,7 @@ struct Config {
     uint8_t outputEnabled{0};
     uint8_t outputNormallyClosed{0};   // operating mode: 1 = de-energise
     uint8_t statusEnabled{0};
+    uint8_t restoreAtStart{0};         // state after a restart: as before
 };
 
 Config g_config;
@@ -154,6 +173,7 @@ void loadConfig(params::ViewFor<kParameters> parameters) {
         if (out.get<Out::Channel>() == ChannelUse::Enabled) config.outputEnabled |= bit;
         if (out.get<Out::Mode>() == OperatingMode::NormallyClosed) config.outputNormallyClosed |= bit;
         if (out.get<Out::Status>() != StatusObject::Disabled) config.statusEnabled |= bit;
+        if (out.get<Out::Start>() == StartState::Restore) config.restoreAtStart |= bit;
     }
     g_config = config;
 }
@@ -227,6 +247,28 @@ void withChannel(unsigned channel, Fn&& fn) {
     withChannel(channel, std::forward<Fn>(fn), std::make_integer_sequence<unsigned, kChannels>{});
 }
 
+// ── Bus power ───────────────────────────────────────────────────────────────
+// The stack debounces SAVE (20 ms down, 200 ms up) and reports the link state;
+// its early warning arrives from the SAVE edge interrupt, ahead of the
+// debounce. The interrupt releases every output and keeps what they were; the
+// main loop does the rest (followBusPower). It logs "pf <ms>" every
+// millisecond while SAVE stays asserted: the last line the host received is
+// the run time on the capacitors, to within the host's polling interval.
+
+volatile bool g_powerFailWarning = false;
+volatile uint32_t g_powerFailAtMs = 0u;
+volatile uint8_t g_outputsAtPowerFail = 0u;  // the pins as they were, active = 1
+bool g_saveAsserted = false;                  // the main loop's view
+
+void onPowerFailIsr(void*, uint64_t) {
+    if (!g_powerFailWarning) {
+        g_outputsAtPowerFail = board_outputs();
+        board_set_outputs(0u);
+    }
+    g_powerFailAtMs = board_millis();
+    g_powerFailWarning = true;
+}
+
 // `on` is the value of the switch object; the operating mode decides what the
 // pin does with it.
 void setOutput(unsigned channel, bool on) {
@@ -235,12 +277,67 @@ void setOutput(unsigned channel, bool on) {
         rlog() << "DO" << channel + 1u << " is disabled";
         return;
     }
+    if (g_saveAsserted || g_powerFailWarning) {
+        rlog() << "DO" << channel + 1u << " not switched: bus power failing";
+        return;
+    }
     const bool energise = on != ((g_config.outputNormallyClosed & bit) != 0u);
     uint8_t mask = board_outputs();
     mask = energise ? static_cast<uint8_t>(mask | bit) : static_cast<uint8_t>(mask & ~bit);
     board_set_outputs(mask);
     g_statusDirty = static_cast<uint8_t>(g_statusDirty | bit);
     rlog() << "DO" << channel + 1u << (on ? " on" : " off") << (energise ? ", energised" : ", released");
+}
+
+// ── Output states across a restart ──────────────────────────────────────────
+// The outputs' switch values, one bit per channel, in a flash log record of
+// the product's own. Written when SAVE warns of a bus power failure and before
+// a planned restart, and only when it changed; read at start for the outputs
+// whose state after a restart is "as before". A reset without warning (the
+// watchdog, a fault, a power cut SAVE did not report) finds the last record.
+
+constexpr uint16_t kOutputStateKey = knx::objects::InterfaceObjectManager::kProductKeyIdFirst;
+uint8_t g_storedOutputs = 0u;
+bool g_storedOutputsKnown = false;
+bool g_factoryReset = false;  // the restart that follows must not store them again
+
+// The switch values of the enabled outputs, for a given state of the pins.
+uint8_t switchValues(uint8_t pins) {
+    return static_cast<uint8_t>((pins ^ g_config.outputNormallyClosed) & g_config.outputEnabled);
+}
+
+void storeOutputs(uint8_t values, const char* why) {
+    if (g_factoryReset || (g_storedOutputsKnown && values == g_storedOutputs)) return;
+    const uint8_t record[1] = {values};
+    if (const auto saved = g_flashLog.save(kOutputStateKey, record); saved.isError()) {
+        rlog() << "output states not stored (" << why << "): " << static_cast<uint32_t>(saved.error());
+        return;
+    }
+    g_storedOutputs = values;
+    g_storedOutputsKnown = true;
+    Line line = rlog();
+    line << "output states stored (" << why << ") ";
+    line.bits(values);
+}
+
+// At start, before the heap is locked: load() allocates.
+void restoreOutputs() {
+    std::vector<uint8_t> record;
+    if (g_flashLog.load(kOutputStateKey, record).isError() || record.size() != 1u) return;
+    g_storedOutputs = record[0];
+    g_storedOutputsKnown = true;
+    for (unsigned ch = 0; ch < kChannels; ++ch) {
+        const uint8_t bit = static_cast<uint8_t>(1u << ch);
+        if ((g_config.restoreAtStart & g_config.outputEnabled & bit) != 0u) {
+            setOutput(ch, (g_storedOutputs & bit) != 0u);
+        }
+    }
+}
+
+void restartDevice(const char* why) {
+    // While SAVE has the outputs released, what they were is what counts.
+    storeOutputs(switchValues(g_powerFailWarning ? g_outputsAtPowerFail : board_outputs()), why);
+    board_restart();
 }
 
 using Bindings = CommissionedBindingsBuilder<std::remove_cvref_t<decltype(kProduct)>, kDefaultBindingCapacity>;
@@ -276,9 +373,11 @@ void printBackend(const knx::physical::TpUartMediumBackend& backend) {
     rlog() << "usart rx " << u.rx_octets << " err " << u.rx_errors << " tx " << u.tx_octets << " refused "
           << u.tx_refused << " rtt dropped " << rtt_dropped();
     rlog() << "heap high water " << static_cast<uint32_t>(g_heap_high_water) << " locked allocs "
-          << static_cast<uint32_t>(knx::heap::violationCount());
+          << static_cast<uint32_t>(knx::heap::violationCount()) << ", stack peak " << startup_stack_peak() << " of "
+          << startup_stack_reserve();
 }
 
+#if H8I8O_TRACE
 // ── Host link trace ─────────────────────────────────────────────────────────
 // One RTT line per burst of octets (bsp/usart1.h): "rx" from the chip, "tx" to
 // it, with the burst's start time in ms modulo 16384. The once-a-second state
@@ -337,6 +436,7 @@ void printTrace() {
         }
     }
 }
+#endif
 
 void printAddress(const char* what, uint16_t address) {
     rlog() << what << (address >> 12) << "." << ((address >> 8) & 0xFu) << "." << (address & 0xFFu);
@@ -430,32 +530,20 @@ void stepBurst(App& app) {
     }
 }
 
-// ── Bus power ───────────────────────────────────────────────────────────────
-// The stack debounces SAVE (20 ms down, 200 ms up) and reports the link state;
-// its early warning arrives from the SAVE edge interrupt, ahead of the
-// debounce, and only notes the time here. The main loop then logs "pf <ms>"
-// every millisecond while SAVE stays asserted: the last line the host
-// received is the run time on the capacitors, to within the host's polling
-// interval.
+// ── Bus power, continued ────────────────────────────────────────────────────
 
-volatile bool g_powerFailWarning = false;
-volatile uint32_t g_powerFailAtMs = 0u;
-
-void onPowerFailIsr(void*, uint64_t) {
-    g_powerFailAtMs = board_millis();
-    g_powerFailWarning = true;
-}
-
-bool g_saveAsserted = false;
 uint32_t g_saveSince = 0u;
 knx::physical::LinkState g_linkState = knx::physical::LinkState::Unknown;
 
-void followBusPower(const knx::physical::TpUartMediumBackend& backend, uint32_t now) {
-    if (g_powerFailWarning) {
-        g_powerFailWarning = false;
+template <typename App>
+void followBusPower(const knx::physical::TpUartMediumBackend& backend, App& app, uint32_t now) {
+    if (g_powerFailWarning && !g_saveAsserted) {
         g_saveAsserted = true;
         g_saveSince = g_powerFailAtMs;
-        rlog() << "power fail warning (SAVE edge)";
+        board_set_outputs(0u);  // again: a switch the loop was making may have undone the interrupt's
+        rlog() << "power fail warning (SAVE edge), outputs released";
+        storeOutputs(switchValues(g_outputsAtPowerFail), "power fail");
+        app.requestPowerFailSave();  // the stack's own state (Data Secure sequence numbers)
     }
     const bool failing = board_bus_power_failing();
     if (failing && !g_saveAsserted) {  // asserted without an edge seen (at start)
@@ -464,13 +552,79 @@ void followBusPower(const knx::physical::TpUartMediumBackend& backend, uint32_t 
         rlog() << "SAVE asserted";
     } else if (!failing && g_saveAsserted) {
         g_saveAsserted = false;
-        rlog() << "SAVE released";
+        if (g_powerFailWarning) {
+            // The bus came back before the supply gave out.
+            board_set_outputs(g_outputsAtPowerFail);
+            g_powerFailWarning = false;
+            rlog() << "SAVE released, outputs back";
+        } else {
+            rlog() << "SAVE released";
+        }
     } else if (failing) {
         rlog() << "pf " << (now - g_saveSince);
     }
     if (const auto state = backend.getLinkState(); state != g_linkState) {
         g_linkState = state;
         rlog() << "link " << knx::physical::linkStateToString(state);
+    }
+}
+
+// ── Programming button ──────────────────────────────────────────────────────
+
+constexpr uint32_t kFactoryResetHoldMs = 10000;   // held this long, the LED flashes ...
+constexpr uint32_t kFactoryResetWindowMs = 5000;  // ... and a release within this resets
+constexpr uint32_t kProgrammingModeTimeoutMs = 15u * 60u * 1000u;
+constexpr uint32_t kFlashPeriodMs = 100;
+
+struct ButtonState {
+    uint32_t pressedAt = 0;
+    bool armed = false;      // a release now is a factory reset
+    bool cancelled = false;  // held past the window
+    bool progMode = false;
+    uint32_t progModeSince = 0;
+};
+ButtonState g_buttonState;
+
+template <typename App>
+void followButton(App& app, uint32_t now) {
+    const uint8_t changed = g_button.update(board_button_pressed() ? 1u : 0u, now, kButtonDebounceMs);
+    const bool pressed = g_button.stable == 1u;
+    if ((changed & 1u) != 0u && pressed) {
+        rlog() << "button";
+        app.toggleProgrammingMode();
+        g_buttonState.pressedAt = now;
+        g_buttonState.armed = false;
+        g_buttonState.cancelled = false;
+    } else if ((changed & 1u) != 0u && g_buttonState.armed) {
+        rlog() << "factory reset";
+        g_buttonState.armed = false;
+        (void)g_flashLog.erase(kOutputStateKey);
+        g_factoryReset = true;
+        const auto reset = app.factoryReset();  // restarts the device when it succeeds
+        g_factoryReset = false;
+        rlog() << "factory reset failed: " << static_cast<uint32_t>(reset.error());
+        board_set_led(app.isProgrammingModeActive());
+    } else if (pressed && !g_buttonState.cancelled) {
+        const uint32_t held = now - g_buttonState.pressedAt;
+        if (held >= kFactoryResetHoldMs + kFactoryResetWindowMs) {
+            g_buttonState.armed = false;
+            g_buttonState.cancelled = true;
+            board_set_led(app.isProgrammingModeActive());
+            rlog() << "factory reset not armed: held too long";
+        } else if (held >= kFactoryResetHoldMs) {
+            if (!g_buttonState.armed) rlog() << "factory reset armed: release the button";
+            g_buttonState.armed = true;
+            board_set_led(((held / kFlashPeriodMs) & 1u) == 0u);
+        }
+    }
+
+    // Programming mode ends by itself, however it was turned on.
+    const bool progMode = app.isProgrammingModeActive();
+    if (progMode && !g_buttonState.progMode) g_buttonState.progModeSince = now;
+    g_buttonState.progMode = progMode;
+    if (progMode && now - g_buttonState.progModeSince >= kProgrammingModeTimeoutMs) {
+        rlog() << "programming mode timed out";
+        app.requestProgrammingMode(false);
     }
 }
 
@@ -538,6 +692,7 @@ int main() {
     // address, a property write) reaches flash only at the next restart.
     app->setTimeSource([]() -> uint32_t { return board_millis(); });
     loadConfig(app->parameters());
+    restoreOutputs();
     g_inputs.stable = g_inputs.candidate = readLogicalInputs();
     g_flashLog.setEraseGuard(backend);
     knx::heap::lock();
@@ -556,7 +711,9 @@ int main() {
     for (;;) {
         app->loop();
         (void)g_flashLog.service();
+#if H8I8O_TRACE
         printTrace();
+#endif
         if (const uint16_t address = app->individualAddress().raw; address != lastAddress) {
             lastAddress = address;
             printAddress("address now ", address);
@@ -567,7 +724,7 @@ int main() {
         if (now != lastTick) {
             lastTick = now;
 
-            followBusPower(*backend, now);
+            followBusPower(*backend, *app, now);
 
             const uint8_t levels = board_read_input_levels();
             if (levels != g_inputs.lastRaw) {
@@ -584,11 +741,7 @@ int main() {
                 }
             }
 
-            const uint8_t buttonChanged = g_button.update(board_button_pressed() ? 1u : 0u, now, kButtonDebounceMs);
-            if ((buttonChanged & 1u) != 0u && g_button.stable == 1u) {
-                rlog() << "button";
-                app->toggleProgrammingMode();
-            }
+            followButton(*app, now);
         }
 
         if (g_statusDirty != 0u && app->lifecycleState() == DeviceLifecycleState::Operational) {
@@ -656,10 +809,14 @@ int main() {
                         line.hex(octet, 2);
                     }
                 }
+#if H8I8O_TRACE
                 rlog() << "lifecycle: " << lifecycleText(app->lifecycleState()) << ", trace dropped "
                        << h8i8o_usart1_trace_dropped();
+#else
+                rlog() << "lifecycle: " << lifecycleText(app->lifecycleState());
+#endif
             } else if (c == 'R') {
-                board_restart();
+                restartDevice("R");
             }
         }
 

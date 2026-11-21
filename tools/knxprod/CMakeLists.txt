@@ -17,7 +17,7 @@ include(${KNSTAX_DIR}/cmake/knx_config.cmake)
 # APDU 15). The exporter writes the table sizes from the build's
 # configuration, so they must be the device's: check both defconfigs when
 # either changes.
-knx_configure(PROFILE host-minimal)
+knx_configure(PROFILE host-minimal OVERRIDES ${CMAKE_CURRENT_LIST_DIR}/../../knx.defconfig)
 add_subdirectory(${KNSTAX_DIR} knstax EXCLUDE_FROM_ALL)
 include(${KNSTAX_DIR}/cmake/knx_product.cmake)
 
