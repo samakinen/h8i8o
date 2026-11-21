@@ -1,101 +1,104 @@
-# KNX Data Secure on the H8i8o: analysis
+# KNX Data Secure on the H8i8o
 
-Status: analysis, 21 November 2026. Nothing here is built. Figures marked "est." are estimates,
-not measurements.
+Status, 22 November 2026: the groundwork is done on both sides; Data Secure itself is not on in
+this firmware yet. Figures marked "est." are estimates, the rest are measured.
 
-KNstaX already implements Data Secure and has run it against ETS6 on ESP32. What it needs to run
-on this board, on the stack's side, is in KNstaX's
+KNstaX implements Data Secure and has run it against ETS6 on ESP32. What it needs to run on a
+small part, on the stack's side, is in KNstaX's
 [docs/design/data-secure-small-target.md](../external/KNstaX/docs/design/data-secure-small-target.md).
-This document covers the board: whether it fits, what the firmware here must give up or add, and
-what only the board can provide.
+This document covers the board: whether it fits, what is done, and what only the board can
+provide.
 
 ## Verdict
 
-**It fits, but only after work on both sides.** Flash is not the problem. RAM is, and so is the way
-the stack's Security Interface Object allocates memory after start-up, which this firmware forbids
-by locking the heap.
+**It fits.** Flash was never the problem and RAM no longer is. What blocks it now is one piece of
+KNstaX work (fixed-capacity Security Interface Object) and the board-only items below.
 
-| | Today | Data Secure needs (est.) |
+| | This firmware (application version 3) | With Data Secure (est.) |
 |---|---:|---:|
-| Flash, image region (120 KiB) | 96,512 B used, **26,368 B free** | 13–19 KiB |
-| RAM (20 KiB) | static 5,584 B + heap about 10.5 KiB + stack 2,560 B: **about 1.5 KiB free** | as KNstaX is today: about 4.8 KiB; after the KNstaX work items: about 2 KiB |
+| Flash, image region (120 KiB = 122,880 B) | 94,464 B | about 113.6 KB: +19.1 KB, as KNstaX's size gate measures it |
+| Static RAM | 1,208 B (4,360 B with `H8I8O_TRACE`) | unchanged |
+| Heap after start | measure with `s` | about +0.7 KiB |
 
-The GD32F103CB has no AES peripheral, so the crypto is software: AES-128, encrypt-only (CCM needs no
-decryption), about 1–1.5 KiB of flash. A secured telegram costs a few milliseconds at 48 MHz
-(est.), outside the TP-UART2's acknowledge deadline.
+The size gate's Data Secure device (tp1-small, software AES, APDU 55, Cortex-M3) measures 105,814 B
+of KNstaX flash and 9,374 B of KNstaX RAM, against 86,651 B and 7,774 B without it. The gate
+reports that device 2.4 KB over the flash it reserves for the H8i8o reference design; that
+reservation is a model of a whole product, and this firmware's own image is what counts here:
+94,464 B now, about 113.6 KB with Data Secure, inside the 120 KiB region with about 9 KB to spare
+(est.).
 
-## What the board can save
+The GD32F103CB has no AES peripheral. KNstaX now has a portable AES-128, encrypt-only: 780 B of
+flash in the gate image, 64 B of stack, no RAM. A secured telegram costs a few milliseconds at
+48 MHz (est.), outside the TP-UART2's acknowledge deadline.
 
-| Saving | RAM | Notes |
-|---|---:|---|
-| Build without the host link trace (`g_trace`, 768 × 2 B, `bsp/usart1.c`) | 1,536 B | Already listed under "Possible future improvements". A build option, so a debug build keeps it |
-| RTT up buffer 2,048 → 512 B (`bsp/rtt.c`) | 1,536 B | It is 2 KiB only to hold the trace during an ETS download. Without the trace, 512 B carries the log |
-| Smaller capacities through a `knx.defconfig` override: 64 group addresses (128 today), 96 associations (160 today) | about 1,200 B (est.) | The address and association tables, their load segments and the persistence scratch all scale with them. 24 objects need far fewer than the `tp1-small` defaults. Changes the memory layout in the product file: rebuild it and raise `applicationVersion` |
-| **Total** | **about 4.2 KiB** | |
+## Done
 
-With these, the board has about 5.7 KiB of RAM for Data Secure's roughly 2 KiB (after the KNstaX
-work items) and for the stack the secure path needs (est. 450 B at peak). As KNstaX is today
-(about 4.8 KiB) it would also fit in RAM, but it would still abort at the first secure download
-(next section). The KNstaX work is needed either way.
+On this board (application version 3):
 
-Flash, if more is needed: the trace build option also removes its code and format strings.
+- The host link trace is a build option (`H8I8O_TRACE`, off), and the RTT up buffer is 512 B
+  without it: static RAM 4,392 → 1,208 B.
+- `knx.defconfig`: 64 group addresses and 96 associations (from 128 and 160), and APDU length 55,
+  the most a 64-octet TP-UART2 frame carries. A secured write of one key table entry needs it.
+  The product file declares the same.
+- Bus power failure: the outputs are released at the `SAVE` edge and the firmware calls
+  `requestPowerFailSave()`, which saves the Data Secure replay state when Secure is on.
+- Factory reset by button through KNstaX's `factoryReset()` (Master Reset 02h), which keeps the
+  Data Secure sending sequence number. A flash erase does not.
+- The stack peak is measured (`s`).
 
-## What blocks it in KNstaX
+In KNstaX (branch `memory-reductions`):
 
-In short (details in the KNstaX design):
+- The memory reductions: KNstaX RAM in the tp1-small reference device 13.3 → 7.8 KiB.
+- The portable AES backend, chosen in Kconfig (`KNX_AES_BACKEND`: software, mbedTLS or the ESP32
+  block). Data Secure builds without mbedTLS.
+- A Data Secure configuration of the size gate, so its flash and RAM are budgeted in CI.
+- `factoryReset()` and a persistence key range for product records.
 
-1. No AES backend for bare metal; the standalone build demands mbedTLS.
-2. The Security Interface Object stores its tables in `std::vector`s and `std::map`s that grow
-   during the ETS download, and the per-sender sequence map grows on the first telegram from a new
-   sender. This firmware locks the heap after start-up (`knx::heap::lock()` in `app/main.cpp`),
-   so the first secure download would abort the device. Fixed-capacity tables are the fix.
-3. With a 15-octet APDU, a secured write of one key-table entry does not fit in a frame. The
-   firmware must move to extended frames: `CONFIG_KNX_MAX_APDU_LENGTH=55` and
-   `maxApduLength = 55` in `app/product.hpp`, 55 being the most a 64-octet TP-UART2 frame carries.
-   About +1 KiB of RAM, already counted in the 2 KiB above.
+## What still blocks it in KNstaX
+
+The Security Interface Object stores its tables in `std::vector`s and `std::map`s that grow
+during the ETS secure download, and the per-sender sequence map grows on the first telegram from a
+new sender. This firmware locks the heap after start-up, so the first secure download would abort
+the device. The size gate's Data Secure device passes because a plain download never reaches those
+paths. Fixed-capacity tables are the fix (design D3–D5).
 
 ## What only the board can provide
 
 - **Factory Tool Key (FDSK).** ETS needs the device's FDSK, entered as its device certificate. It
   must be random per device, not derived from the MCU's unique ID, which anyone can read. Proposal:
-  generate it at the first start from the noise source below, store it in the persistence pages,
-  and print the device certificate with the RTT `a` command. A mass erase then gives the device a
-  new FDSK, as the factory reset it is.
+  generate it at the first start from the noise source below, store it in the persistence pages
+  (a product key, outside what a Master Reset touches), and print the device certificate with the
+  RTT `a` command. A mass erase then gives the device a new FDSK; the button's factory reset keeps
+  it, as it should. The generation and storage depend on the MCU, not the board: they belong in
+  KNstaX's GD32F1 port (`ports/gd32f1`), which this firmware would then use.
 - **Randomness.** No TRNG. Seed a generator at start-up from the LSB noise of repeated ADC
   conversions (internal temperature sensor and V<sub>REFINT</sub>) and a counter kept in
   persistence. The S-A_Sync random must never repeat for a key; the stack's fallback (time since
-  boot, serial number, call counter) repeats after a reset.
-- **Sequence numbers at power loss.** The TP-UART2's `SAVE` warning gives about 122 ms
-  (hardware.md). That is enough to write the sequence state into pre-erased flash, which removes
-  most of the periodic writes and the flash wear they cause. A periodic checkpoint every minute of
-  secured traffic would compact the 8 KiB log every hour or two of continuous traffic (est.).
+  boot, serial number, call counter) repeats after a reset. Also an MCU matter, for the port.
 - **Read protection.** The keys are stored in flash in plain form. Anyone who can attach a probe
-  to the `D C G V` pads can read them, as the README procedure does today. A secured installation
-  needs read protection set after programming, which ends reading the flash (and with it the
-  FDSK) over SWD. Whether RTT diagnostics still work with protection set has to be checked on this
-  part.
+  to the `D C G V` pads can read them. A secured installation needs read protection set after
+  programming, which ends reading the flash (and with it the FDSK) over SWD. Whether RTT
+  diagnostics still work with protection set has to be checked on this part.
 - **Product file.** The product declares itself Data Secure capable, with key table capacities
-  that match the firmware's. Each object gets a security requirement. Signing with the example
-  manufacturer ID is the same as today.
+  that match the firmware's, and each object gets a security requirement. That is application
+  version 4: declaring it before the firmware runs Data Secure would make ETS try a secure
+  commissioning the device cannot do.
 
 ## Risks and open points
 
-- **Extended frames on this board are untested.** The KNstaX TP-UART backend handles frames up to
-  64 octets, but has only carried standard frames on the H8i8o.
-- **ETS behaviour with a 55-octet APDU** and a secure download on this device: only an ETS6 run on
-  the board shows it.
-- **Stack reserve.** 2.5 KiB, with no measured peak. Measure the peak by painting the stack before
-  enabling Secure, and again with it.
-- **All figures are estimates** until KNstaX's size gate has a Data Secure reference device and this
-  firmware is built with it.
+- **Extended frames on this board** are new in application version 3. KNstaX's TP-UART backend
+  handles frames up to 64 octets, but the board has only carried standard frames so far. An ETS6
+  download of version 3 tests them.
+- **ETS behaviour with a secure download on this device**: only an ETS6 run on the board shows it.
+- **Stack reserve**: 2.5 KiB. Read the peak with `s` after an ETS download now, and again with
+  Data Secure.
 
 ## Order of work
 
-1. Here: the trace build option, the smaller RTT buffer, the capacity override. These are useful
-   without Data Secure too.
-2. In KNstaX: the portable AES and the build split, then the fixed-capacity Security Interface
-   Object (its design document, §8).
-3. Here: APDU 55 on standard traffic first (extended frames, ETS download), then Data Secure on: the
-   FDSK, the random source, the `SAVE` save path, the product file.
+1. Here, done: application version 3. Test it on the board: an ETS6 download (extended frames),
+   a bus power cut with outputs set to restore, the factory reset, the heap and stack figures.
+2. In KNstaX: the fixed-capacity Security Interface Object (D3–D5); the FDSK store and the random
+   source in `ports/gd32f1`.
+3. Here: move onto the GD32F1 port, then Data Secure on: the FDSK, the product file (version 4).
 4. An ETS6 secure commissioning run on the board. Then read protection and its effect on
    diagnostics.
