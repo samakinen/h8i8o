@@ -429,6 +429,9 @@ void stepBurst(App& app) {
     }
 }
 
+bool g_saveAsserted = false;
+uint32_t g_saveSince = 0u;
+
 }  // namespace
 
 int main() {
@@ -518,6 +521,19 @@ int main() {
         const uint32_t now = board_millis();
         if (now != lastTick) {
             lastTick = now;
+
+            // Bus power failure (SAVE): log the edge, then the milliseconds since,
+            // once per tick, until the supply gives out. The last "pf" line the
+            // host received is the run time on the capacitors, to within the
+            // host's polling interval.
+            const bool failing = board_bus_power_failing();
+            if (failing != g_saveAsserted) {
+                g_saveAsserted = failing;
+                g_saveSince = now;
+                rlog() << (failing ? "SAVE asserted" : "SAVE released");
+            } else if (failing) {
+                rlog() << "pf " << (now - g_saveSince);
+            }
 
             const uint8_t levels = board_read_input_levels();
             if (levels != g_inputs.lastRaw) {

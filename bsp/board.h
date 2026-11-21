@@ -26,6 +26,11 @@ extern "C" {
 #define H8I8O_DI_ACTIVE_LOW 1
 #endif
 /* Programming button PA11, internal pull-up, active low. */
+/* TP-UART2 SAVE (PB15): low while the bus voltage is failing. */
+#ifndef H8I8O_SAVE_ACTIVE_LOW
+#define H8I8O_SAVE_ACTIVE_LOW 1
+#endif
+
 #ifndef H8I8O_BUTTON_ACTIVE_LOW
 #define H8I8O_BUTTON_ACTIVE_LOW 1
 #endif
@@ -55,6 +60,9 @@ uint8_t board_read_inputs(void);
 uint8_t board_read_input_levels(void);
 
 bool board_button_pressed(void);
+
+/* True while the TP-UART2 signals a bus power failure (SAVE pin). */
+bool board_bus_power_failing(void);
 void board_set_led(bool on);
 
 /* 32 bits derived from the 96-bit unique ID. */

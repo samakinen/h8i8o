@@ -7,8 +7,8 @@
  * a write from the main context and one from the receive callback never
  * interleave (uart_hal.h, concurrency model).
  *
- * No MCU pin is known to reach the TP-UART2's RESET or SAVE, so set_reset
- * and read_save are NULL.
+ * SAVE reaches PB15 (read_save). No MCU pin is known to reach RESET, so
+ * set_reset is NULL.
  */
 #pragma once
 

@@ -208,6 +208,12 @@ static size_t hal_tx_free(void *context)
     return H8I8O_USART1_TX_RING - 1u - tx_used();
 }
 
+static bool hal_read_save(void *context)
+{
+    (void)context;
+    return board_bus_power_failing();
+}
+
 knx_uart_hal_t h8i8o_usart1_hal(void)
 {
     knx_uart_hal_t hal = {0};
@@ -216,6 +222,7 @@ knx_uart_hal_t h8i8o_usart1_hal(void)
     hal.ops.close = hal_close;
     hal.ops.write = hal_write;
     hal.ops.tx_free = hal_tx_free;
+    hal.ops.read_save = hal_read_save;
     return hal;
 }
 

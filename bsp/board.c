@@ -82,6 +82,10 @@ static void gpio_init(void)
     GPIOB_OCTL |= 0x3F8u;
     GPIOB_CTL0 = 0x88888444u;
     GPIOB_CTL1 = (GPIOB_CTL1 & ~0xFFu) | 0x88u;
+
+    /* PB15 is the TP-UART2's SAVE output: input with pull-up. */
+    GPIOB_OCTL |= 1u << 15;
+    GPIOB_CTL1 = (GPIOB_CTL1 & ~(0xFu << 28)) | (0x8u << 28);
 }
 
 void board_init(void)
@@ -138,6 +142,16 @@ uint8_t board_read_input_levels(void)
     const uint32_t b = GPIOB_ISTAT;
     /* DI1 = PA15, DI2-DI8 = PB3-PB9 */
     return (uint8_t)(((a >> 15) & 1u) | (((b >> 3) & 0x7Fu) << 1));
+}
+
+bool board_bus_power_failing(void)
+{
+    const bool high = (GPIOB_ISTAT & (1u << 15)) != 0u;
+#if H8I8O_SAVE_ACTIVE_LOW
+    return !high;
+#else
+    return high;
+#endif
 }
 
 uint8_t board_read_inputs(void)
