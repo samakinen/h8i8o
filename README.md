@@ -170,7 +170,8 @@ The module's hardware allows considerably more than this firmware does. Candidat
   patterns for "not loaded" and "transceiver not ready", an "in operation" heartbeat
   object.
 - The DIAUX and AUX signals, once their electrical function is known.
-- KNX Data Secure, if it fits the 128 KiB flash and 20 KiB RAM.
+- KNX Data Secure. It fits the 128 KiB flash and 20 KiB RAM, after work on the stack and on
+  this firmware: [docs/data-secure.md](docs/data-secure.md).
 - A build without the RTT host-link trace, for a smaller image.
 - A registered manufacturer ID, for a product that can be distributed.
 
