@@ -136,6 +136,22 @@ without an octet, so a frame can be split over two lines.
 Expected at every start: one unexpected octet and one USART receive error, from the
 framing error the TP-UART2 produces while it resets.
 
+**Bus power.** The TP-UART2's `SAVE` output (PB15) goes low when the bus voltage fails. The
+stack debounces it as it debounces the bus-health output of other transceivers: the link is
+reported down once `SAVE` has stayed low for 20 ms, and up again after 200 ms high. The log
+shows:
+
+| Line | Meaning |
+|---|---|
+| `link Up`, `link Down`, `link Degraded` | The stack's link state: `SAVE` debounced, the chip's answers to `U_State`, its temperature warning |
+| `power fail warning (SAVE edge)` | `SAVE` fell; from the edge interrupt, ahead of the debounce |
+| `pf <ms>` | Every millisecond while `SAVE` stays low: time since it fell |
+| `SAVE released` | `SAVE` is high again |
+
+The last `pf` line the host receives after the bus is disconnected is how long the device
+runs on its capacitors, to within the host's RTT polling interval. The statistics (`s`)
+count the warnings (`pfw`).
+
 ## Changing the firmware
 
 - **Pin polarities** are in `bsp/board.h`. Nothing else in the firmware depends on them.

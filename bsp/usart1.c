@@ -21,6 +21,19 @@
 #define USART1_IRQN 37u
 #define USART1_PRIORITY 0x40u /* below SysTick (0x00) */
 
+/* SAVE (PB15) edge interrupt: EXTI line 15, port B. Same priority as USART1,
+ * below SysTick, so its time stamp is current. */
+#define AFIO_EXTISS3 REG(0x40010014u) /* sources of EXTI lines 12-15 */
+#define EXTI_INTEN REG(0x40010400u)
+#define EXTI_RTEN REG(0x40010408u)
+#define EXTI_FTEN REG(0x4001040Cu)
+#define EXTI_PD REG(0x40010414u)
+#define SAVE_LINE (1u << 15)
+#define SAVE_EXTISS_SHIFT 12u
+#define SAVE_EXTISS_PORT_B 1u
+#define EXTI15_10_IRQN 40u
+#define SAVE_PRIORITY USART1_PRIORITY
+
 /* STAT bits */
 #define ST_PERR (1u << 0)
 #define ST_FERR (1u << 1)
@@ -48,6 +61,9 @@ static volatile uint32_t g_tx_tail; /* next to send, written by the interrupt */
 
 static volatile h8i8o_usart1_stats_t g_stats;
 static uint8_t g_context; /* non-null context for the HAL */
+
+static knx_uart_hal_save_edge_cb_t g_save_cb;
+static void *g_save_ctx;
 
 static inline uint32_t irq_save(void)
 {
@@ -214,6 +230,50 @@ static bool hal_read_save(void *context)
     return board_bus_power_failing();
 }
 
+/* Both edges: the stack reads the level itself and acts on the edge into
+ * power failure only. */
+void EXTI15_10_IRQHandler(void)
+{
+    if ((EXTI_PD & SAVE_LINE) == 0u) {
+        return;
+    }
+    EXTI_PD = SAVE_LINE; /* write 1 to clear */
+    if (g_save_cb != 0) {
+        g_save_cb(g_save_ctx, (uint32_t)board_micros());
+    }
+}
+
+static bool hal_install_save_edge_isr(void *context, knx_uart_hal_save_edge_cb_t cb, void *save_context)
+{
+    (void)context;
+    if (cb == 0) {
+        return false;
+    }
+    NVIC_ICER1 = 1u << (EXTI15_10_IRQN - 32u);
+    g_save_cb = cb;
+    g_save_ctx = save_context;
+    AFIO_EXTISS3 = (AFIO_EXTISS3 & ~(0xFu << SAVE_EXTISS_SHIFT)) | (SAVE_EXTISS_PORT_B << SAVE_EXTISS_SHIFT);
+    EXTI_RTEN |= SAVE_LINE;
+    EXTI_FTEN |= SAVE_LINE;
+    EXTI_PD = SAVE_LINE;
+    EXTI_INTEN |= SAVE_LINE;
+    NVIC_IPR(EXTI15_10_IRQN) = SAVE_PRIORITY;
+    NVIC_ISER1 = 1u << (EXTI15_10_IRQN - 32u);
+    return true;
+}
+
+static void hal_remove_save_edge_isr(void *context)
+{
+    (void)context;
+    NVIC_ICER1 = 1u << (EXTI15_10_IRQN - 32u);
+    EXTI_INTEN &= ~SAVE_LINE;
+    EXTI_RTEN &= ~SAVE_LINE;
+    EXTI_FTEN &= ~SAVE_LINE;
+    EXTI_PD = SAVE_LINE;
+    g_save_cb = 0;
+    g_save_ctx = 0;
+}
+
 knx_uart_hal_t h8i8o_usart1_hal(void)
 {
     knx_uart_hal_t hal = {0};
@@ -223,6 +283,8 @@ knx_uart_hal_t h8i8o_usart1_hal(void)
     hal.ops.write = hal_write;
     hal.ops.tx_free = hal_tx_free;
     hal.ops.read_save = hal_read_save;
+    hal.ops.install_save_edge_isr = hal_install_save_edge_isr;
+    hal.ops.remove_save_edge_isr = hal_remove_save_edge_isr;
     return hal;
 }
 

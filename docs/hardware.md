@@ -29,6 +29,7 @@ separately.
 |---|---|---|---|
 | SWDIO / SWCLK | PA13 / PA14 | SWD; JTAG released (`AFIO_PCF0.SWJ_CFG = 010`) | Measured |
 | TP-UART2 host link TX / RX | PA9 / PA10 (USART1) | 19200 baud, 8 data bits, even parity, 1 stop bit | Measured |
+| TP-UART2 `SAVE` | PB15 | Input with pull-up, EXTI line 15 on both edges; low while the bus voltage is failing | Traced on the board; high with bus power measured |
 | Programming button | PA11 | Input, internal pull-up; active low | Measured |
 | KNX LED | PA12 | Push-pull output; active high | Measured |
 | DI1 | PA15 | Input, internal pull-up; active low (contact to GND) | Measured |
@@ -42,7 +43,7 @@ PA15, PB3 and PB4 (DI1–DI3) are JTAG pins after reset. The firmware releases J
 SWD. Never set `SWJ_CFG` to `100`: that disables SWD as well, and the board has no other
 way in.
 
-Not known: whether the TP-UART2's `RESET` and `SAVE` pins reach the MCU, the function of the
+Not known: whether the TP-UART2's `RESET` pin reaches the MCU, the function of the
 slide switch and the option links, and the electrical ratings of the input and output stages
 (the rows of SOT-23 parts between the MCU and the connectors). The firmware does not depend
 on any of them. Check the I/O board before connecting loads.

@@ -73,11 +73,13 @@ void DebugMon_Handler(void) W;
 void PendSV_Handler(void) W;
 void SysTick_Handler(void) W;
 void USART1_IRQHandler(void) W;
+void EXTI15_10_IRQHandler(void) W;
 
 /* Every interrupt defaults; the used ones are named after the range on purpose. */
 #pragma GCC diagnostic ignored "-Woverride-init"
 
 #define USART1_IRQN 37u
+#define EXTI15_10_IRQN 40u /* EXTI lines 10-15; PB15 is the TP-UART2's SAVE */
 #define IRQ_COUNT 43u /* GD32F103 medium density */
 
 __attribute__((section(".isr_vector"), used))
@@ -88,4 +90,5 @@ void (*const vector_table[16u + IRQ_COUNT])(void) = {
     SVC_Handler, DebugMon_Handler, 0, PendSV_Handler, SysTick_Handler,
     [16u ... 16u + IRQ_COUNT - 1u] = Default_Handler,
     [16u + USART1_IRQN] = USART1_IRQHandler,
+    [16u + EXTI15_10_IRQN] = EXTI15_10_IRQHandler,
 };

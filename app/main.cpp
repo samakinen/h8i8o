@@ -270,7 +270,8 @@ void printBackend(const knx::physical::TpUartMediumBackend& backend) {
           << s.partialFramesDiscarded << " ovf " << s.rxOverflowDrops << " unexp " << s.unexpectedOctets
           << " resets " << s.chipResets;
     rlog().hex(s.lastStateBits, 2) << " state, missedPolls " << s.missedStatePolls
-          << " erases " << s.erasesGuarded << "/" << s.erasesDeclined << " deferred " << s.ackDecisionsDeferred;
+          << " erases " << s.erasesGuarded << "/" << s.erasesDeclined << " deferred " << s.ackDecisionsDeferred
+          << " pfw " << s.powerFailWarnings;
     const auto u = h8i8o_usart1_stats();
     rlog() << "usart rx " << u.rx_octets << " err " << u.rx_errors << " tx " << u.tx_octets << " refused "
           << u.tx_refused << " rtt dropped " << rtt_dropped();
@@ -429,8 +430,49 @@ void stepBurst(App& app) {
     }
 }
 
+// ── Bus power ───────────────────────────────────────────────────────────────
+// The stack debounces SAVE (20 ms down, 200 ms up) and reports the link state;
+// its early warning arrives from the SAVE edge interrupt, ahead of the
+// debounce, and only notes the time here. The main loop then logs "pf <ms>"
+// every millisecond while SAVE stays asserted: the last line the host
+// received is the run time on the capacitors, to within the host's polling
+// interval.
+
+volatile bool g_powerFailWarning = false;
+volatile uint32_t g_powerFailAtMs = 0u;
+
+void onPowerFailIsr(void*, uint64_t) {
+    g_powerFailAtMs = board_millis();
+    g_powerFailWarning = true;
+}
+
 bool g_saveAsserted = false;
 uint32_t g_saveSince = 0u;
+knx::physical::LinkState g_linkState = knx::physical::LinkState::Unknown;
+
+void followBusPower(const knx::physical::TpUartMediumBackend& backend, uint32_t now) {
+    if (g_powerFailWarning) {
+        g_powerFailWarning = false;
+        g_saveAsserted = true;
+        g_saveSince = g_powerFailAtMs;
+        rlog() << "power fail warning (SAVE edge)";
+    }
+    const bool failing = board_bus_power_failing();
+    if (failing && !g_saveAsserted) {  // asserted without an edge seen (at start)
+        g_saveAsserted = true;
+        g_saveSince = now;
+        rlog() << "SAVE asserted";
+    } else if (!failing && g_saveAsserted) {
+        g_saveAsserted = false;
+        rlog() << "SAVE released";
+    } else if (failing) {
+        rlog() << "pf " << (now - g_saveSince);
+    }
+    if (const auto state = backend.getLinkState(); state != g_linkState) {
+        g_linkState = state;
+        rlog() << "link " << knx::physical::linkStateToString(state);
+    }
+}
 
 }  // namespace
 
@@ -464,7 +506,10 @@ int main() {
     hooks.logLine = &hookLogLine;
     static knx::platform::CooperativePlatform platform(hooks);
 
-    auto* backend = new knx::physical::TpUartMediumBackend(h8i8o_usart1_hal(), platform);
+    knx::physical::TpUartConfig tpuartConfig{};
+    tpuartConfig.saveSignal.notifyPowerFailFromIsr = true;
+    auto* backend = new knx::physical::TpUartMediumBackend(h8i8o_usart1_hal(), platform, tpuartConfig);
+    backend->setPowerFailIsrHandler(&onPowerFailIsr, nullptr);
 
     g_inputs.lastRaw = board_read_input_levels();
 
@@ -522,18 +567,7 @@ int main() {
         if (now != lastTick) {
             lastTick = now;
 
-            // Bus power failure (SAVE): log the edge, then the milliseconds since,
-            // once per tick, until the supply gives out. The last "pf" line the
-            // host received is the run time on the capacitors, to within the
-            // host's polling interval.
-            const bool failing = board_bus_power_failing();
-            if (failing != g_saveAsserted) {
-                g_saveAsserted = failing;
-                g_saveSince = now;
-                rlog() << (failing ? "SAVE asserted" : "SAVE released");
-            } else if (failing) {
-                rlog() << "pf " << (now - g_saveSince);
-            }
+            followBusPower(*backend, now);
 
             const uint8_t levels = board_read_input_levels();
             if (levels != g_inputs.lastRaw) {
