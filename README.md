@@ -60,6 +60,10 @@ git clone --recursive <repository-url>
 
 or run `git submodule update --init` in an existing clone.
 
+The submodule tracks KNstaX's `main` branch. A clone checks out the commit recorded here; to move
+to the latest KNstaX, run `git submodule update --remote external/KNstaX`, build, and commit the
+new submodule commit.
+
 ## What you need
 
 - An H8i8o V0.8 board and a KNX TP1 line with a power supply.

@@ -1,3 +1,4 @@
 [submodule "external/KNstaX"]
 	path = external/KNstaX
 	url = https://github.com/samakinen/KNstaX.git
+	branch = main
