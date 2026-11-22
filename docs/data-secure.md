@@ -16,15 +16,15 @@ KNstaX work (fixed-capacity Security Interface Object) and the board-only items 
 
 | | This firmware (application version 3) | With Data Secure (est.) |
 |---|---:|---:|
-| Flash, image region (120 KiB = 122,880 B) | 94,464 B | about 113.6 KB: +19.1 KB, as KNstaX's size gate measures it |
-| Static RAM | 1,208 B (4,360 B with `H8I8O_TRACE`) | unchanged |
-| Heap after start | measure with `s` | about +0.7 KiB |
+| Flash, image region (120 KiB = 122,880 B) | 95,756 B | about 114.9 KB: +19.1 KB, as KNstaX's size gate measures it |
+| Static RAM, besides the 3 KiB stack | 1,208 B (4,408 B with `H8I8O_TRACE`) | unchanged |
+| Heap after start | 7,660 B | about +0.7 KiB |
 
 The size gate's Data Secure device (tp1-small, software AES, APDU 55, Cortex-M3) measures 105,814 B
 of KNstaX flash and 9,374 B of KNstaX RAM, against 86,651 B and 7,774 B without it. The gate
 reports that device 2.4 KB over the flash it reserves for the H8i8o reference design; that
 reservation is a model of a whole product, and this firmware's own image is what counts here:
-94,464 B now, about 113.6 KB with Data Secure, inside the 120 KiB region with about 9 KB to spare
+95,756 B now, about 114.9 KB with Data Secure, inside the 120 KiB region with about 8 KB to spare
 (est.).
 
 The GD32F103CB has no AES peripheral. KNstaX now has a portable AES-128, encrypt-only: 780 B of
@@ -44,7 +44,10 @@ On this board (application version 3):
   `requestPowerFailSave()`, which saves the Data Secure replay state when Secure is on.
 - Factory reset by button through KNstaX's `factoryReset()` (Master Reset 02h), which keeps the
   Data Secure sending sequence number. A flash erase does not.
-- The stack peak is measured (`s`).
+- The stack peak is measured (`s`): 1,760 B of the 3 KiB reserve, which sits at the bottom of
+  RAM, so an overflow faults and the watchdog resets the device.
+- Tested on the board with ETS6: downloads with 55-octet extended frames, a bus power cut with
+  an output set to restore, the factory reset and commissioning again afterwards.
 
 In KNstaX (branch `memory-reductions`):
 
@@ -86,17 +89,13 @@ paths. Fixed-capacity tables are the fix (design D3–D5).
 
 ## Risks and open points
 
-- **Extended frames on this board** are new in application version 3. KNstaX's TP-UART backend
-  handles frames up to 64 octets, but the board has only carried standard frames so far. An ETS6
-  download of version 3 tests them.
 - **ETS behaviour with a secure download on this device**: only an ETS6 run on the board shows it.
-- **Stack reserve**: 2.5 KiB. Read the peak with `s` after an ETS download now, and again with
-  Data Secure.
+- **Stack reserve**: 3 KiB, 1,760 B used. Read the peak again with Data Secure: a secure
+  download decrypts on the receive path.
 
 ## Order of work
 
-1. Here, done: application version 3. Test it on the board: an ETS6 download (extended frames),
-   a bus power cut with outputs set to restore, the factory reset, the heap and stack figures.
+1. Here, done and tested on the board: application version 3.
 2. In KNstaX: the fixed-capacity Security Interface Object (D3–D5); the FDSK store and the random
    source in `ports/gd32f1`.
 3. Here: move onto the GD32F1 port, then Data Secure on: the FDSK, the product file (version 4).

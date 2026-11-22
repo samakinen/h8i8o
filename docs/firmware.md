@@ -70,12 +70,17 @@ The device is on the bus about 15 ms after reset.
 |---|---|---:|---|
 | Flash | `0x0800_0000` | 120 KiB | The image |
 | Flash | `0x0801_E000` | 8 KiB | Persistence: two banks of four 1 KiB pages |
-| RAM | `0x2000_0000` | 20 KiB | `.data` (with the flash erase routine), `.bss`, heap, 2.5 KiB stack at the top |
+| RAM | `0x2000_0000` | 20 KiB | 3 KiB stack at the bottom, then `.data` (with the flash erase routine), `.bss` and the heap |
 
-Use in this release: image 94,464 B (77 % of the 120 KiB region), static RAM 1,208 B
-(4,360 B with `H8I8O_TRACE`). The heap after start and the stack peak are measured on the
-board: `s` prints both. The linker script stops the image from growing into the
-persistence pages, and `_sbrk` refuses to grow the heap into the stack reserve.
+Use in this release: image 95,756 B (78 % of the 120 KiB region), static RAM 1,208 B
+(4,408 B with `H8I8O_TRACE`) besides the stack. On the board, `s` prints the heap after
+start (7,660 B) and the stack peak (1,760 B, the same with 100 requests answered in a row).
+
+The stack grows down towards the start of RAM. One that overflows its reserve runs into the
+reserved addresses below `0x2000_0000` and faults; the watchdog resets the device, and the
+next start logs `reset: watchdog`. Nothing else is overwritten. The linker script stops the
+image from growing into the persistence pages, and `_sbrk` grows the heap up to the end of
+RAM.
 
 ## Persistence
 
