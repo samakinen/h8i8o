@@ -72,8 +72,20 @@ namespace {
 
 // ── Log over RTT ────────────────────────────────────────────────────────────
 
+// One log line: "[s.mmm] text\n". It streams through a small buffer that is
+// written to RTT whenever it fills and at the end, so a line costs 72 B of
+// stack wherever it is logged (the stack's own log lines arrive deep in the
+// receive path) and is never truncated. Only the main loop logs, so lines do
+// not interleave; a line that logs while it is being built would.
 class Line {
 public:
+    Line() {
+        const uint32_t ms = board_millis();
+        *this << "[" << ms / 1000u << "." << (ms / 100u) % 10u << (ms / 10u) % 10u << ms % 10u << "] ";
+    }
+    Line(const Line&) = delete;
+    Line& operator=(const Line&) = delete;
+
     Line& operator<<(const char* text) {
         while (*text != 0) put(*text++);
         return *this;
@@ -98,24 +110,24 @@ public:
     }
     ~Line() {
         put('\n');
-        rtt_write(_text, _length);
+        flush();
     }
 
 private:
     void put(char c) {
-        if (_length < sizeof _text - 1u) _text[_length++] = c;
+        if (_length == sizeof _text) flush();
+        _text[_length++] = c;
     }
-    char _text[240];
+    void flush() {
+        rtt_write(_text, _length);
+        _length = 0;
+    }
+    char _text[64];
     uint32_t _length{0};
 };
 
-Line rlog() {
-    Line line;
-    const uint32_t ms = board_millis();
-    line << "[" << ms / 1000u << "." ;
-    line << (ms / 100u) % 10u << (ms / 10u) % 10u << ms % 10u << "] ";
-    return line;
-}
+// Guaranteed copy elision: the line is built in the caller's frame.
+Line rlog() { return Line(); }
 
 // ── Platform hooks ──────────────────────────────────────────────────────────
 
@@ -419,7 +431,7 @@ struct TraceBurst {
 
 TraceBurst g_burst;
 
-void printTrace() {
+[[gnu::noinline]] void printTrace() {
     uint16_t entries[32];
     const size_t n = h8i8o_usart1_trace_read(entries, sizeof entries / sizeof entries[0]);
     for (size_t i = 0; i < n; ++i) {
@@ -438,7 +450,7 @@ void printTrace() {
 }
 #endif
 
-void printAddress(const char* what, uint16_t address) {
+[[gnu::noinline]] void printAddress(const char* what, uint16_t address) {
     rlog() << what << (address >> 12) << "." << ((address >> 8) & 0xFu) << "." << (address & 0xFFu);
 }
 
@@ -496,7 +508,7 @@ void printBurst(const char* what) {
 }
 
 template <typename App>
-void stepBurst(App& app) {
+[[gnu::noinline]] void stepBurst(App& app) {
     if (!g_busTest.active || app.lifecycleState() != DeviceLifecycleState::Operational) return;
     if (g_busTest.sent != 0u && board_millis() - g_busTest.lastMs < g_busTest.gapMs) return;
 
@@ -628,9 +640,16 @@ void followButton(App& app, uint32_t now) {
     }
 }
 
-}  // namespace
+// ── Start-up and main loop ──────────────────────────────────────────────────
+// Start-up runs once, in a frame of its own (startDevice), so its locals (the
+// bindings being built, the start result) are gone before the loop starts.
+// The loop's jobs that log or publish are functions of their own as well:
+// what stays on the stack for good is main()'s small frame, and the deepest
+// path is the stack's receive chain on top of it.
 
-int main() {
+using Backend = knx::physical::TpUartMediumBackend;
+
+[[gnu::noinline]] auto startDevice(Backend*& backendOut) {
     board_init();
     rtt_init();
     const uint32_t cause = board_reset_cause();
@@ -662,7 +681,7 @@ int main() {
 
     knx::physical::TpUartConfig tpuartConfig{};
     tpuartConfig.saveSignal.notifyPowerFailFromIsr = true;
-    auto* backend = new knx::physical::TpUartMediumBackend(h8i8o_usart1_hal(), platform, tpuartConfig);
+    auto* backend = new Backend(h8i8o_usart1_hal(), platform, tpuartConfig);
     backend->setPowerFailIsrHandler(&onPowerFailIsr, nullptr);
 
     g_inputs.lastRaw = board_read_input_levels();
@@ -704,6 +723,119 @@ int main() {
              << ", heap " << static_cast<uint32_t>(g_heap_high_water)
              << (app->parametersLoaded() ? ", parameters loaded" : ", parameters NOT loaded (defaults)");
     }
+    backendOut = backend;
+    return app;
+}
+
+// Once a millisecond: bus power, the inputs, the programming button.
+template <typename App>
+[[gnu::noinline]] void serviceTick(App& app, const Backend& backend, uint32_t now) {
+    followBusPower(backend, app, now);
+
+    const uint8_t levels = board_read_input_levels();
+    if (levels != g_inputs.lastRaw) {
+        g_inputs.lastRaw = levels;
+        rlog().bits(levels);  // raw pin levels, DI1 first
+    }
+    const uint8_t changed = g_inputs.update(readLogicalInputs(), now, g_config.debounceMs);
+    for (unsigned ch = 0; ch < kChannels; ++ch) {
+        if ((changed & (1u << ch)) == 0u) continue;
+        const bool on = (g_inputs.stable >> ch) & 1u;
+        rlog() << "DI" << ch + 1u << (on ? " active" : " inactive");
+        if (app.lifecycleState() == DeviceLifecycleState::Operational) {
+            withChannel(ch, [&](auto c) { (void)app.template publish<inputPort(c)>(on); });
+        }
+    }
+
+    followButton(app, now);
+}
+
+template <typename App>
+[[gnu::noinline]] void publishStatus(App& app) {
+    for (unsigned ch = 0; ch < kChannels; ++ch) {
+        if ((g_statusDirty & (1u << ch)) == 0u) continue;
+        if ((g_config.statusEnabled & (1u << ch)) == 0u) {
+            g_statusDirty = static_cast<uint8_t>(g_statusDirty & ~(1u << ch));
+            continue;
+        }
+        const bool on = (logicalOutputs() >> ch) & 1u;
+        bool sent = false;
+        withChannel(ch, [&](auto c) { sent = app.template publish<statusPort(c)>(on).isOk(); });
+        if (!sent) break;  // the send pipeline is full: next pass
+        g_statusDirty = static_cast<uint8_t>(g_statusDirty & ~(1u << ch));
+    }
+}
+
+// The RTT command channel (the commands are listed at the top of this file).
+template <typename App>
+[[gnu::noinline]] void handleCommand(App& app, const Backend& backend, int c) {
+    if (g_command.collecting) {
+        if (c == ';') {
+            g_command.collecting = false;
+            g_command.text[g_command.length] = '\0';
+            if (parseBurst(g_command.text, g_busTest)) {
+                g_busTest.active = true;
+                Line line = rlog();
+                line << "burst to " << (g_busTest.target >> 12) << "." << ((g_busTest.target >> 8) & 0xFu) << "."
+                     << (g_busTest.target & 0xFFu) << ": " << g_busTest.total << " requests, gap " << g_busTest.gapMs
+                     << " ms";
+            } else {
+                rlog() << "usage: b<area>.<line>.<device>,<count>,<gap ms>;";
+            }
+        } else if (g_command.length + 1u < sizeof(g_command.text)) {
+            g_command.text[g_command.length++] = static_cast<char>(c);
+        } else {
+            g_command.collecting = false;
+            rlog() << "usage: b<area>.<line>.<device>,<count>,<gap ms>;";
+        }
+        return;
+    }
+    if (c == 'b') {
+        g_command = CommandLine{};
+        g_command.collecting = true;
+    } else if (c == 'x') {
+        if (g_busTest.active) {
+            g_busTest.active = false;
+            printBurst("burst stopped ");
+        }
+    } else if (c == 'p') {
+        app.toggleProgrammingMode();
+    } else if (c == 's') {
+        printBackend(backend);
+    } else if (c == 'i') {
+        Line line = rlog();
+        line << "DI levels ";
+        line.bits(board_read_input_levels());
+        line << " button " << (board_button_pressed() ? 1u : 0u);
+    } else if (c >= '1' && c <= '8') {
+        const unsigned ch = static_cast<unsigned>(c - '1');
+        setOutput(ch, ((logicalOutputs() >> ch) & 1u) == 0u);
+    } else if (c == 'a') {
+        printAddress("address ", app.individualAddress().raw);
+        {
+            // PID_SERIAL_NUMBER as ETS reads it, not the board's number.
+            Line line = rlog();
+            line << "device serial ";
+            for (const uint8_t octet : app.deviceObject().getSerialNumber()) {
+                line.hex(octet, 2);
+            }
+        }
+#if H8I8O_TRACE
+        rlog() << "lifecycle: " << lifecycleText(app.lifecycleState()) << ", trace dropped "
+               << h8i8o_usart1_trace_dropped();
+#else
+        rlog() << "lifecycle: " << lifecycleText(app.lifecycleState());
+#endif
+    } else if (c == 'R') {
+        restartDevice("R");
+    }
+}
+
+}  // namespace
+
+int main() {
+    Backend* backend = nullptr;
+    auto app = startDevice(backend);
     board_watchdog_start();
 
     uint32_t lastTick = board_millis();
@@ -720,104 +852,15 @@ int main() {
         }
         stepBurst(*app);
 
-        const uint32_t now = board_millis();
-        if (now != lastTick) {
+        if (const uint32_t now = board_millis(); now != lastTick) {
             lastTick = now;
-
-            followBusPower(*backend, *app, now);
-
-            const uint8_t levels = board_read_input_levels();
-            if (levels != g_inputs.lastRaw) {
-                g_inputs.lastRaw = levels;
-                rlog().bits(levels);  // raw pin levels, DI1 first
-            }
-            const uint8_t changed = g_inputs.update(readLogicalInputs(), now, g_config.debounceMs);
-            for (unsigned ch = 0; ch < kChannels; ++ch) {
-                if ((changed & (1u << ch)) == 0u) continue;
-                const bool on = (g_inputs.stable >> ch) & 1u;
-                rlog() << "DI" << ch + 1u << (on ? " active" : " inactive");
-                if (app->lifecycleState() == DeviceLifecycleState::Operational) {
-                    withChannel(ch, [&](auto c) { (void)app->template publish<inputPort(c)>(on); });
-                }
-            }
-
-            followButton(*app, now);
+            serviceTick(*app, *backend, now);
         }
-
         if (g_statusDirty != 0u && app->lifecycleState() == DeviceLifecycleState::Operational) {
-            for (unsigned ch = 0; ch < kChannels; ++ch) {
-                if ((g_statusDirty & (1u << ch)) == 0u) continue;
-                if ((g_config.statusEnabled & (1u << ch)) == 0u) {
-                    g_statusDirty = static_cast<uint8_t>(g_statusDirty & ~(1u << ch));
-                    continue;
-                }
-                const bool on = (logicalOutputs() >> ch) & 1u;
-                bool sent = false;
-                withChannel(ch, [&](auto c) { sent = app->template publish<statusPort(c)>(on).isOk(); });
-                if (!sent) break;  // the send pipeline is full: next pass
-                g_statusDirty = static_cast<uint8_t>(g_statusDirty & ~(1u << ch));
-            }
+            publishStatus(*app);
         }
-
-        if (const int c = rtt_read_char(); c >= 0 && g_command.collecting) {
-            if (c == ';') {
-                g_command.collecting = false;
-                g_command.text[g_command.length] = '\0';
-                if (parseBurst(g_command.text, g_busTest)) {
-                    g_busTest.active = true;
-                    Line line = rlog();
-                    line << "burst to " << (g_busTest.target >> 12) << "." << ((g_busTest.target >> 8) & 0xFu) << "."
-                         << (g_busTest.target & 0xFFu) << ": " << g_busTest.total << " requests, gap " << g_busTest.gapMs
-                         << " ms";
-                } else {
-                    rlog() << "usage: b<area>.<line>.<device>,<count>,<gap ms>;";
-                }
-            } else if (g_command.length + 1u < sizeof(g_command.text)) {
-                g_command.text[g_command.length++] = static_cast<char>(c);
-            } else {
-                g_command.collecting = false;
-                rlog() << "usage: b<area>.<line>.<device>,<count>,<gap ms>;";
-            }
-        } else if (c >= 0) {
-            if (c == 'b') {
-                g_command = CommandLine{};
-                g_command.collecting = true;
-            } else if (c == 'x') {
-                if (g_busTest.active) {
-                    g_busTest.active = false;
-                    printBurst("burst stopped ");
-                }
-            } else if (c == 'p') {
-                app->toggleProgrammingMode();
-            } else if (c == 's') {
-                printBackend(*backend);
-            } else if (c == 'i') {
-                Line line = rlog();
-                line << "DI levels ";
-                line.bits(board_read_input_levels());
-                line << " button " << (board_button_pressed() ? 1u : 0u);
-            } else if (c >= '1' && c <= '8') {
-                const unsigned ch = static_cast<unsigned>(c - '1');
-                setOutput(ch, ((logicalOutputs() >> ch) & 1u) == 0u);
-            } else if (c == 'a') {
-                printAddress("address ", app->individualAddress().raw);
-                {
-                    // PID_SERIAL_NUMBER as ETS reads it, not the board's number.
-                    Line line = rlog();
-                    line << "device serial ";
-                    for (const uint8_t octet : app->deviceObject().getSerialNumber()) {
-                        line.hex(octet, 2);
-                    }
-                }
-#if H8I8O_TRACE
-                rlog() << "lifecycle: " << lifecycleText(app->lifecycleState()) << ", trace dropped "
-                       << h8i8o_usart1_trace_dropped();
-#else
-                rlog() << "lifecycle: " << lifecycleText(app->lifecycleState());
-#endif
-            } else if (c == 'R') {
-                restartDevice("R");
-            }
+        if (const int c = rtt_read_char(); c >= 0) {
+            handleCommand(*app, *backend, c);
         }
 
         board_watchdog_feed();

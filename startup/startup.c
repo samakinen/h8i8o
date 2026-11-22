@@ -9,15 +9,15 @@
  * core is halted, so the probe can attach at any time (without DBG_SLEEP the
  * core in WFI stops the clock the debug port needs).
  *
- * The stack reserve (link.ld) is painted with a pattern at reset, so
- * startup_stack_peak() can tell how deep the stack has been since.
+ * The stack reserve (link.ld: at the bottom of RAM, from _sstack up to
+ * _estack) is painted with a pattern at reset, so startup_stack_peak() can
+ * tell how deep the stack has been since.
  */
 #include <stdint.h>
 
 #include "board.h"
 
-extern uint32_t _sidata, _sdata, _edata, _sbss, _ebss, _estack;
-extern char _heap_limit; /* link.ld; char, as startup/syscalls.c declares it */
+extern uint32_t _sidata, _sdata, _edata, _sbss, _ebss, _sstack, _estack;
 extern void (*__preinit_array_start[])(void);
 extern void (*__preinit_array_end[])(void);
 extern void (*__init_array_start[])(void);
@@ -28,26 +28,27 @@ int main(void);
 
 #define STACK_PAINT 0xC5ACCE55u
 
-/* Everything below the current stack pointer, down to the heap limit. */
+/* Everything below the current stack pointer, down to the bottom of the
+ * reserve. */
 static void paint_stack(void)
 {
     uint32_t *sp;
     __asm volatile("mov %0, sp" : "=r"(sp));
-    for (volatile uint32_t *p = (uint32_t *)&_heap_limit; p < sp - 16; ++p) {
+    for (volatile uint32_t *p = &_sstack; p < sp - 16; ++p) {
         *p = STACK_PAINT;
     }
 }
 
 uint32_t startup_stack_peak(void)
 {
-    const volatile uint32_t *p = (const uint32_t *)&_heap_limit;
+    const volatile uint32_t *p = &_sstack;
     while (p < &_estack && *p == STACK_PAINT) {
         ++p;
     }
     return (uint32_t)((uintptr_t)&_estack - (uintptr_t)p);
 }
 
-uint32_t startup_stack_reserve(void) { return (uint32_t)((uintptr_t)&_estack - (uintptr_t)&_heap_limit); }
+uint32_t startup_stack_reserve(void) { return (uint32_t)((uintptr_t)&_estack - (uintptr_t)&_sstack); }
 
 void Reset_Handler(void)
 {
@@ -83,8 +84,9 @@ void Reset_Handler(void)
     }
 }
 
-/* A fault is logged by the next boot (board_reset_cause()); the watchdog or
- * the debugger takes it from here. */
+/* A fault, a stack overflow among them (link.ld), ends here or in a lockup;
+ * the watchdog resets the device and the next boot logs it
+ * (board_reset_cause()). */
 static void Default_Handler(void)
 {
     for (;;) {

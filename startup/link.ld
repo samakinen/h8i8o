@@ -5,9 +5,11 @@
  * banks of four 1 KiB pages at 0x0801E000; bsp/gd32_fmc.h). The image cannot
  * grow into the persistence region: the FLASH region ends where it starts.
  *
- * RAM: .data (with .ramfunc, the flash erase wait), .bss, the heap (locked
- * once the stack has started), and the main stack at the top. The stack
- * reserve is 2.5 KiB; _sbrk refuses to grow the heap into it.
+ * RAM: the main stack at the bottom, then .data (with .ramfunc, the flash
+ * erase wait), .bss and the heap (locked once the stack has started) up to the
+ * end. The stack grows down towards the start of RAM: a stack that overflows
+ * its reserve runs into the reserved addresses below 0x20000000 and faults,
+ * and the watchdog resets the device, instead of overwriting the heap.
  */
 MEMORY
 {
@@ -16,7 +18,7 @@ MEMORY
 }
 
 ENTRY(Reset_Handler)
-_Min_Stack_Size = 2560;
+_Stack_Size = 3072;
 
 SECTIONS
 {
@@ -36,6 +38,13 @@ SECTIONS
 
     /DISCARD/ : { *(.ARM.exidx*) *(.ARM.extab*) }
 
+    .stack (NOLOAD) : {
+        _sstack = .;
+        . += _Stack_Size;
+        . = ALIGN(8);
+        _estack = .;
+    } > RAM
+
     _sidata = LOADADDR(.data);
     .data : {
         . = ALIGN(4); _sdata = .;
@@ -54,8 +63,8 @@ SECTIONS
         . = ALIGN(8); _heap_start = .;
     } > RAM
 
-    _heap_limit = ORIGIN(RAM) + LENGTH(RAM) - _Min_Stack_Size;
-    _estack = ORIGIN(RAM) + LENGTH(RAM);
+    _heap_limit = ORIGIN(RAM) + LENGTH(RAM);
 
-    ASSERT(_heap_start <= _heap_limit, "static RAM leaves no room for the heap and the stack")
+    ASSERT(_sstack == ORIGIN(RAM), "the stack must start at the bottom of RAM")
+    ASSERT(_heap_start <= _heap_limit, "static RAM leaves no room for the heap")
 }

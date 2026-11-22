@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /* newlib-nano system calls for the H8i8o: the heap break, and stubs.
  *
- * _sbrk grows the heap up to the stack reserve (link.ld) and records the
+ * _sbrk grows the heap up to the end of RAM (link.ld) and records the
  * high-water mark, which the firmware reports over RTT. Nothing else does
  * I/O through newlib.
  */
