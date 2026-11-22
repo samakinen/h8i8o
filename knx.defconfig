@@ -12,3 +12,21 @@ CONFIG_KNX_ASSOCIATION_TABLE_ENTRIES=96
 # KNX Data Secure needs to write a key table entry in one frame
 # (docs/data-secure.md). app/product.hpp declares the same maxApduLength.
 CONFIG_KNX_MAX_APDU_LENGTH=55
+
+# KNX Data Secure (application version 4, docs/data-secure.md). The software
+# AES: the GD32F103 has no AES block and the build has no crypto library.
+CONFIG_KNX_ENABLE_SECURITY=y
+CONFIG_KNX_AES_BACKEND_SOFTWARE=y
+# The Security Interface Object's tables are fixed arrays of these sizes, so
+# their RAM is reserved whether ETS fills them or not; app/product.hpp
+# declares the same sizes to ETS (and may not declare more).
+#   group keys: one per secured group address, up to the address table's 64;
+#   senders: devices that send secured telegrams to this one (16), and as many
+#   slots again to carry their sequence numbers through a new download;
+#   2 point-to-point keys; no firmware or zone keys (ETS commissions it).
+CONFIG_KNX_SECURITY_GROUP_KEYS=64
+CONFIG_KNX_SECURITY_IA_ENTRIES=16
+CONFIG_KNX_SECURITY_UNLISTED_SENDERS=16
+CONFIG_KNX_SECURITY_P2P_KEYS=2
+CONFIG_KNX_SECURITY_FIRMWARE_KEYS=0
+CONFIG_KNX_SECURITY_ZONE_KEYS=0

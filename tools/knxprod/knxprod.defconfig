@@ -1,0 +1,7 @@
+# The product file build only runs KNstaX's exporter: no media. Without
+# KNXnet/IP, Data Secure needs no mbedTLS (that is for IP Secure), and without
+# the virtual bus the build also works outside Linux. Neither changes what the
+# product file declares; the device's capacities come from knx.defconfig.
+CONFIG_KNX_BUILD_NETIP=n
+CONFIG_KNX_ENABLE_TUNNELING=n
+CONFIG_KNX_BUILD_VIRTUAL_BUS=n

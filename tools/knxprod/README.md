@@ -20,8 +20,9 @@ docker run --rm -v "$PWD":/work -w /work knstax-host \
     sh -c "cmake -S tools/knxprod -B build/knxprod -G Ninja && cmake --build build/knxprod --target h8i8o_knxprod"
 ```
 
-Output: `build/knxprod/h8i8o.knxprod.xml`, application `M-00FA_A-0001-03` with 24 objects
-and 56 parameters on 16 pages.
+Output: `build/knxprod/h8i8o.knxprod.xml`, application `M-00FA_A-0001-04` with 24 objects
+and 56 parameters on 16 pages, KNX Data Secure capable (64 group keys, 16 senders, 2
+point-to-point keys).
 
 ## Pack and sign
 
@@ -54,5 +55,7 @@ application program in the ETS project.
 The exporter writes the table sizes from the build's KNstaX configuration. This build uses
 the `host-minimal` profile with the repository's `knx.defconfig` on top, the same file the
 firmware applies to `tp1-small`, so the product file declares the firmware's capacities
-(64 group addresses, 96 associations). A change to `knx.defconfig` is a change of the
-product: raise `applicationVersion`.
+(64 group addresses, 96 associations, the Data Secure key tables). A change to
+`knx.defconfig` is a change of the product: raise `applicationVersion`. `knxprod.defconfig`
+then turns off what only a device needs (KNXnet/IP, the virtual bus), so the build needs no
+mbedTLS and also works outside Linux.

@@ -21,6 +21,14 @@
  * them. If the bus comes back before the supply gives out, the outputs return
  * to their switch values.
  *
+ * KNX Data Secure: at the first start the firmware makes the device's Factory
+ * Tool Key (FDSK) from its random source and keeps it in the flash log, among
+ * the product's own records, which neither a factory reset nor a firmware
+ * update with a new persistence layout erases. ETS needs it as the device
+ * certificate, which the k command prints. The random source (S-A_Sync
+ * responses, the FDSK) is AES in counter mode, seeded at every start from ADC
+ * noise, the unique ID and a start counter (knx::security::SeededRandom).
+ *
  * Flash erases: the FMC driver masks interrupts for the 37-39 ms erase and the
  * backend, as FlashLog's erase guard, puts the TP-UART2 in busy mode for it
  * (docs/firmware.md).
@@ -31,6 +39,8 @@
  *   i  print the raw input levels
  *   1-8 toggle that output locally and send its status
  *   a  print the individual address, device serial, lifecycle state (and trace drops)
+ *   k  print the device certificate (serial number and FDSK, for ETS) and the
+ *      Data Secure state
  *   R  restart
  *   b<area>.<line>.<device>,<count>,<gap ms>;  send that many A_DeviceDescriptor_Read
  *      to the device (a bus test generator, see stepBurst); x stops it
@@ -52,8 +62,12 @@
 #include "knx/objects/object_persistence.hpp"
 #include "knx/physical/tpuart_medium_backend.hpp"
 #include "knx/platform/cooperative_platform.hpp"
+#include "knx/security/device_certificate.hpp"
+#include "knx/security/seeded_random.hpp"
 #include "knx/util/heap.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -152,6 +166,77 @@ knx::objects::FlashLog g_flashLog(h8i8o_fmc_hal());
 
 std::unique_ptr<knx::objects::ObjectPersistence> makePersistence() {
     return std::make_unique<knx::objects::FlashLogPersistence>(g_flashLog);
+}
+
+// The product's own records, in the key range the stack leaves alone
+// (InterfaceObjectManager::kProductKeyIdFirst..Last): a factory reset does not
+// touch them, and a new persistence layout keeps them.
+constexpr uint16_t kProductKeyFirst = knx::objects::InterfaceObjectManager::kProductKeyIdFirst;
+constexpr uint16_t kOutputStateKey = kProductKeyFirst;       // output switch values
+constexpr uint16_t kFdskKey = kProductKeyFirst + 1u;         // Factory Tool Key, 16 octets
+constexpr uint16_t kStartCounterKey = kProductKeyFirst + 2u; // starts so far, 4 octets
+
+// ── Random source and Factory Tool Key (KNX Data Secure) ────────────────────
+
+knx::security::SeededRandom g_random;
+std::array<uint8_t, 16> g_fdsk{};
+
+void hookRandom(void*, uint8_t* out, size_t length) { g_random.fill(std::span<uint8_t>(out, length)); }
+
+// Seeds the random source: a start counter kept in flash (so no two seedings
+// are the same, whatever the noise), the unique ID, the time, and 1024 ADC
+// conversions of the temperature sensor and VREFINT, whose low bits are noise.
+// At start, before the heap is locked: load() allocates.
+void seedRandom() {
+    uint32_t starts = 0;
+    std::vector<uint8_t> record;
+    if (g_flashLog.load(kStartCounterKey, record).isOk() && record.size() == 4u) {
+        starts = static_cast<uint32_t>(record[0]) << 24 | static_cast<uint32_t>(record[1]) << 16 |
+                 static_cast<uint32_t>(record[2]) << 8 | record[3];
+    }
+    ++starts;
+    const uint8_t counter[4] = {static_cast<uint8_t>(starts >> 24), static_cast<uint8_t>(starts >> 16),
+                                static_cast<uint8_t>(starts >> 8), static_cast<uint8_t>(starts)};
+    if (const auto saved = g_flashLog.save(kStartCounterKey, counter); saved.isError()) {
+        rlog() << "start counter not stored: " << static_cast<uint32_t>(saved.error());
+    }
+    g_random.absorb(counter);
+
+    uint8_t uid[12];
+    board_unique_id(uid);
+    g_random.absorb(uid);
+
+    uint16_t samples[128];
+    for (int round = 0; round < 8; ++round) {
+        board_adc_noise(samples, sizeof samples / sizeof samples[0]);
+        g_random.absorb(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(samples), sizeof samples));
+    }
+    const uint64_t us = board_micros();
+    g_random.absorb(std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(&us), sizeof us));
+    g_random.finish();
+}
+
+// The Factory Tool Key: the stored one, or a new one at the first start. It
+// must stay the same for the device's life: ETS knows the device by it. Only
+// a full erase of the flash makes a new one (and a new device certificate).
+void loadOrMakeFdsk() {
+    std::vector<uint8_t> record;
+    const auto nonZero = [](const std::array<uint8_t, 16>& key) {
+        return std::any_of(key.begin(), key.end(), [](uint8_t b) { return b != 0u; });
+    };
+    if (g_flashLog.load(kFdskKey, record).isOk() && record.size() == g_fdsk.size()) {
+        std::copy(record.begin(), record.end(), g_fdsk.begin());
+        if (nonZero(g_fdsk)) return;
+    }
+    do {
+        g_random.fill(g_fdsk);
+    } while (!nonZero(g_fdsk));
+    if (const auto saved = g_flashLog.save(kFdskKey, g_fdsk); saved.isError()) {
+        // Without it the next start makes another key, and ETS loses the device.
+        rlog() << "factory tool key NOT stored: " << static_cast<uint32_t>(saved.error());
+        return;
+    }
+    rlog() << "factory tool key made: print the device certificate with k";
 }
 
 // ── Inputs and outputs ──────────────────────────────────────────────────────
@@ -308,7 +393,6 @@ void setOutput(unsigned channel, bool on) {
 // whose state after a restart is "as before". A reset without warning (the
 // watchdog, a fault, a power cut SAVE did not report) finds the last record.
 
-constexpr uint16_t kOutputStateKey = knx::objects::InterfaceObjectManager::kProductKeyIdFirst;
 uint8_t g_storedOutputs = 0u;
 bool g_storedOutputsKnown = false;
 bool g_factoryReset = false;  // the restart that follows must not store them again
@@ -669,7 +753,11 @@ using Backend = knx::physical::TpUartMediumBackend;
     }
     knx::objects::setPersistenceFactory(&makePersistence);
 
+    seedRandom();
+    loadOrMakeFdsk();
+
     knx::platform::CooperativeHooks hooks{};
+    hooks.randomBytes = &hookRandom;
     hooks.millis = &hookMillis;
     hooks.micros = &hookMicros;
     hooks.idle = &hookIdle;
@@ -696,8 +784,12 @@ using Backend = knx::physical::TpUartMediumBackend;
         board_set_led(state == DeviceLifecycleState::Commissioning);
         rlog() << "lifecycle: " << lifecycleText(state);
     });
-    auto started = startCommissionedProduct(platform, kProduct, std::move(bindings),
-                                            std::unique_ptr<knx::physical::Tp1MediumBackend>(backend));
+    CommissionedProductOptions options{};
+    options.mediumBackend = std::unique_ptr<knx::physical::Tp1MediumBackend>(backend);
+    // A factory default: in force until ETS installs its own Tool Key, and
+    // again after a factory reset. Security Mode stays ETS's to switch on.
+    options.secure.factoryToolKey = g_fdsk;
+    auto started = startCommissionedProduct(platform, kProduct, std::move(bindings), std::move(options));
     if (started.isError()) {
         rlog() << "start failed: " << static_cast<uint32_t>(started.error());
         // Outputs stay inactive; the watchdog is not running yet. Try again in 10 s.
@@ -723,6 +815,8 @@ using Backend = knx::physical::TpUartMediumBackend;
              << ", heap " << static_cast<uint32_t>(g_heap_high_water)
              << (app->parametersLoaded() ? ", parameters loaded" : ", parameters NOT loaded (defaults)");
     }
+    rlog() << "data secure " << (app->isSecurityEnabled() ? "on" : "off") << ", tool key "
+           << (app->toolKeyInForceIs(g_fdsk) ? "FDSK (k prints the device certificate)" : "from ETS");
     backendOut = backend;
     return app;
 }
@@ -764,6 +858,22 @@ template <typename App>
         if (!sent) break;  // the send pipeline is full: next pass
         g_statusDirty = static_cast<uint8_t>(g_statusDirty & ~(1u << ch));
     }
+}
+
+// The device certificate: what ETS asks for when a secure device is added to
+// a project (serial number and FDSK). It is the FDSK in clear, so it is only
+// printed when asked for, on the debug probe's channel.
+template <typename App>
+[[gnu::noinline]] void printCertificate(App& app) {
+    const auto serial = app.deviceObject().getSerialNumber();
+    if (serial.size() != 6u) {
+        rlog() << "device certificate: no serial number";
+        return;
+    }
+    const auto text = knx::security::formatDeviceCertificate(std::span<const uint8_t, 6>(serial.data(), 6), g_fdsk);
+    rlog() << "device certificate " << text.data();
+    rlog() << "data secure " << (app.isSecurityEnabled() ? "on" : "off") << ", tool key "
+           << (app.toolKeyInForceIs(g_fdsk) ? "FDSK" : "from ETS (the FDSK is back after a factory reset)");
 }
 
 // The RTT command channel (the commands are listed at the top of this file).
@@ -826,6 +936,8 @@ template <typename App>
 #else
         rlog() << "lifecycle: " << lifecycleText(app.lifecycleState());
 #endif
+    } else if (c == 'k') {
+        printCertificate(app);
     } else if (c == 'R') {
         restartDevice("R");
     }

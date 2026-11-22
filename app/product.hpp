@@ -15,8 +15,12 @@
  * restart. docs/application.md describes them for ETS users.
  *
  * The capacities the product file declares (group addresses, associations,
- * APDU length) come from knx.defconfig, which the firmware and the product
- * file build both apply.
+ * APDU length, Data Secure key tables) come from knx.defconfig, which the
+ * firmware and the product file build both apply.
+ *
+ * KNX Data Secure (application version 4): ETS commissions the device with
+ * its Factory Tool Key, which the firmware makes at the first start and
+ * prints as the device certificate (docs/data-secure.md).
  *
  * Bump PersistencePolicy::schemaVersion whenever a port is added, removed or
  * reordered: the stored layout is positional.
@@ -151,14 +155,23 @@ inline constexpr auto kProduct = makeCommissionedProduct<kParameters>(
             .manufacturerId = ManufacturerId(0x00FA),  // KNstaX's example ID: not a registered product (README)
             .medium = endpoint::Medium::TP1,
             .applicationNumber = 1,
-            .applicationVersion = 3,  // bump when objects, parameters or knx.defconfig change
-            .firmwareRevision = 2,
+            .applicationVersion = 4,  // bump when objects, parameters or knx.defconfig change
+            .firmwareRevision = 3,
             .maxApduLength = 55,      // CONFIG_KNX_MAX_APDU_LENGTH in knx.defconfig
         },
         PersistencePolicy{
             .namespacePrefix = "h8i8o",
             .schemaVersion = 1,
             .persistKnxState = true,
+        },
+        // KNX Data Secure: ETS may secure any object; none has to be. The
+        // table sizes are the KNX_SECURITY_* capacities in knx.defconfig.
+        SecurityPolicy{
+            .dataSecureCapable = true,
+            .groupObjectRequirement = SecurityRequirement::None,
+            .individualAddressEntries = 16,
+            .groupKeyTableEntries = 64,
+            .p2pKeyTableEntries = 2,
         }));
 
 }  // namespace h8i8o

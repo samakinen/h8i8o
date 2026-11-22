@@ -68,6 +68,15 @@ void board_set_led(bool on);
 /* 32 bits derived from the 96-bit unique ID. */
 uint32_t board_serial_number(void);
 
+/* The 96-bit unique ID, 12 octets. */
+void board_unique_id(uint8_t out[12]);
+
+/* Raw conversions of the internal temperature sensor and VREFINT, alternately,
+ * at the shortest sampling time: their low bits are noise. For seeding a
+ * random generator at start-up only (about 5 us per sample); the ADC is
+ * switched off again afterwards. */
+void board_adc_noise(uint16_t *samples, uint32_t count);
+
 /* What caused the last reset (RCU_RSTSCK flags, then cleared). */
 uint32_t board_reset_cause(void);
 const char *board_reset_cause_text(uint32_t cause);

@@ -13,11 +13,11 @@ project(h8i8o_knxprod LANGUAGES C CXX)
 
 set(KNSTAX_DIR "${CMAKE_CURRENT_LIST_DIR}/../../external/KNstaX" CACHE PATH "KNstaX source tree")
 include(${KNSTAX_DIR}/cmake/knx_config.cmake)
-# host-minimal has the tp1-small capacities (128 addresses, 160 associations,
-# APDU 15). The exporter writes the table sizes from the build's
-# configuration, so they must be the device's: check both defconfigs when
-# either changes.
-knx_configure(PROFILE host-minimal OVERRIDES ${CMAKE_CURRENT_LIST_DIR}/../../knx.defconfig)
+# The exporter writes the table sizes from the build's configuration, so the
+# firmware's knx.defconfig goes on top of host-minimal; knxprod.defconfig then
+# drops the media the exporter does not need.
+knx_configure(PROFILE host-minimal OVERRIDES ${CMAKE_CURRENT_LIST_DIR}/../../knx.defconfig
+                                             ${CMAKE_CURRENT_LIST_DIR}/knxprod.defconfig)
 add_subdirectory(${KNSTAX_DIR} knstax EXCLUDE_FROM_ALL)
 include(${KNSTAX_DIR}/cmake/knx_product.cmake)
 

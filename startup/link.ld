@@ -18,7 +18,10 @@ MEMORY
 }
 
 ENTRY(Reset_Handler)
-_Stack_Size = 3072;
+/* 5 KiB: 1.8 KiB measured without Data Secure, and a secured telegram adds
+ * about 1.3 KiB of buffers in the CCM and around it. The heap needs about
+ * 10 KiB of the rest (docs/firmware.md). */
+_Stack_Size = 5120;
 
 SECTIONS
 {

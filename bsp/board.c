@@ -10,6 +10,13 @@
 #define RCU_CFG0 REG(0x40021004u)
 #define RCU_APB2EN REG(0x40021018u)
 #define RCU_RSTSCK REG(0x40021024u)
+/* ADC0 */
+#define ADC0_STAT REG(0x40012400u)
+#define ADC0_CTL1 REG(0x40012408u)
+#define ADC0_SAMPT0 REG(0x4001240Cu)
+#define ADC0_RSQ0 REG(0x4001242Cu)
+#define ADC0_RSQ2 REG(0x40012434u)
+#define ADC0_RDATA REG(0x4001244Cu)
 /* FMC wait states */
 #define FMC_WS REG(0x40022000u)
 /* AFIO */
@@ -181,6 +188,42 @@ void board_set_led(bool on)
     const bool high = on;
 #endif
     GPIOA_BOP = high ? (1u << 12) : (1u << (12 + 16));
+}
+
+void board_unique_id(uint8_t out[12])
+{
+    const volatile uint32_t *uid = (const volatile uint32_t *)UID_BASE;
+    for (uint32_t w = 0; w < 3u; ++w) {
+        const uint32_t word = uid[w];
+        for (uint32_t i = 0; i < 4u; ++i) {
+            out[w * 4u + i] = (uint8_t)(word >> (8u * i));
+        }
+    }
+}
+
+void board_adc_noise(uint16_t *samples, uint32_t count)
+{
+    /* ADC clock: APB2 48 MHz / 4 = 12 MHz (ADCPSC = 01b; at most 14 MHz). */
+    RCU_CFG0 = (RCU_CFG0 & ~(3u << 14)) | (1u << 14);
+    RCU_APB2EN |= 1u << 9; /* ADC0EN */
+    /* ADCON, with the temperature sensor and VREFINT on (TSVREN); the regular
+     * group starts on SWRCST (ETSRC = 111b, ETERC). */
+    ADC0_CTL1 = (1u << 0) | (1u << 23) | (7u << 17) | (1u << 20);
+    const uint32_t t0 = (uint32_t)board_micros();
+    while ((uint32_t)board_micros() - t0 < 20u) { /* ADC power-up and sensor start-up */
+    }
+    ADC0_SAMPT0 &= ~((7u << 18) | (7u << 21)); /* channels 16 and 17: 1.5 cycles */
+    ADC0_RSQ0 &= ~(0xFu << 20);                /* one conversion */
+    for (uint32_t i = 0; i < count; ++i) {
+        ADC0_RSQ2 = (i & 1u) ? 17u : 16u;
+        ADC0_STAT = 0u;
+        ADC0_CTL1 |= 1u << 22; /* SWRCST */
+        while ((ADC0_STAT & (1u << 1)) == 0u) { /* EOC */
+        }
+        samples[i] = (uint16_t)(ADC0_RDATA & 0xFFFu);
+    }
+    ADC0_CTL1 = 0u; /* off */
+    RCU_APB2EN &= ~(1u << 9);
 }
 
 uint32_t board_serial_number(void)
