@@ -92,16 +92,29 @@ restarts and bus power cuts.
 ETS shows the manufacturer as "KNX Association": the product uses the example manufacturer
 ID 0x00FA, as explained in the [README](../README.md#status-and-limitations).
 
+The device supports KNX Data Secure: any object can be secured in ETS, and none has to be.
+Without security it is commissioned as above. With it, ETS also needs the device
+certificate: [data-secure.md](data-secure.md#commissioning-with-ets6).
+
 ### Factory reset
 
 Hold the programming button for 10 seconds and release it while the LED flashes fast. The
 device returns to its factory state and restarts: address 15.15.255, no group addresses or
 associations, default parameters. It is the reset ETS does with a Master Reset (erase code
-02h), so it keeps what that keeps, such as the KNX Data Secure sequence number.
+02h), so it keeps what that keeps, such as the KNX Data Secure sequence number. The device is
+back on its Factory Tool Key with Data Secure off, and its device certificate is unchanged.
 
 Erasing the whole flash with the debug probe and programming the firmware again also works
-([README](../README.md#flash-the-board)), but it is not the same for a device that will use
-KNX Data Secure: it loses that sequence number too.
+([README](../README.md#flash-the-board)), but it is not the same for KNX Data Secure: the
+device loses its sequence number and makes a new Factory Tool Key, so it has a new device
+certificate, and ETS must be given the new one.
+
+### Updating from application version 3
+
+Version 4 adds KNX Data Secure; the objects and parameters are the same as in version 3.
+Import the new product file, change the device's application program in the ETS project to
+version 4 and download it. The device keeps its individual address, tables and parameters
+across the firmware update.
 
 ### Updating from application version 2
 

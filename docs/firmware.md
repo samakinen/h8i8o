@@ -20,8 +20,10 @@ How the firmware is built and how it runs. For what it does on the bus, see
 
 Everything is register-level C and C++23; there is no vendor HAL. KNstaX is built with its
 `tp1-small` profile and `knx.defconfig` on top: TP1 only, 64 group addresses, 96
-associations, APDU length 55 (extended frames, which KNX Data Secure needs). The product
-file is built with the same `knx.defconfig`, so it declares what the firmware implements.
+associations, APDU length 55 (extended frames, which KNX Data Secure needs), and KNX Data
+Secure with the software AES and fixed key tables (64 group keys, 16 senders, 2 point-to-point
+keys). The product file is built with the same `knx.defconfig`, so it declares what the
+firmware implements; [data-secure.md](data-secure.md) describes the Data Secure part.
 
 Build options (`cmake -D<option>=ON`):
 
@@ -70,11 +72,13 @@ The device is on the bus about 15 ms after reset.
 |---|---|---:|---|
 | Flash | `0x0800_0000` | 120 KiB | The image |
 | Flash | `0x0801_E000` | 8 KiB | Persistence: two banks of four 1 KiB pages |
-| RAM | `0x2000_0000` | 20 KiB | 3 KiB stack at the bottom, then `.data` (with the flash erase routine), `.bss` and the heap |
+| RAM | `0x2000_0000` | 20 KiB | 5 KiB stack at the bottom, then `.data` (with the flash erase routine), `.bss` and the heap |
 
-Use in this release: image 95,756 B (78 % of the 120 KiB region), static RAM 1,208 B
-(4,408 B with `H8I8O_TRACE`) besides the stack. On the board, `s` prints the heap after
-start (7,660 B) and the stack peak (1,760 B, the same with 100 requests answered in a row).
+Use in this release (application version 4): image 115,240 B (94 % of the 120 KiB region),
+static RAM 1,304 B (4,504 B with `H8I8O_TRACE`) besides the stack. On the board, `s` prints
+the heap after start and the stack peak. Application version 3, without Data Secure,
+measured 7,660 B of heap and a 1,760 B stack peak; a secured telegram adds about 1.3 KiB of
+stack, hence the 5 KiB reserve.
 
 The stack grows down towards the start of RAM. One that overflows its reserve runs into the
 reserved addresses below `0x2000_0000` and faults; the watchdog resets the device, and the
@@ -86,9 +90,15 @@ RAM.
 
 KNstaX's `FlashLog` keeps a log-structured store in the persistence pages: a CRC on every
 record, and compaction into the other bank when one fills. It holds the individual address,
-the group address and association tables and the parameters, and one record of the
-firmware's own: the outputs' switch values, under KNstaX's first product key
-(`kProductKeyIdFirst`, 0x7F00), which the stack never uses.
+the group address and association tables, the parameters and the Data Secure state, and
+three records of the firmware's own, under KNstaX's product keys, which the stack never uses
+and keeps when a new persistence layout discards its own state:
+
+| Key | Record |
+|---|---|
+| 0x7F00 | The outputs' switch values |
+| 0x7F01 | The Factory Tool Key (16 octets), made at the first start |
+| 0x7F02 | A start counter (4 octets), part of the random source's seed |
 
 The output record is written when `SAVE` warns of a bus power failure and before a planned
 restart (after an ETS download, `R`), and only when it changed. A reset without warning
@@ -122,7 +132,7 @@ Programming (writing half-words) is short and runs from flash with interrupts en
 | Manufacturer ID | 0x00FA (KNstaX's example ID; see the README) |
 | Serial number | 0x00FA followed by 32 bits hashed (FNV-1a) from the MCU's 96-bit unique ID |
 | Mask version | 0x07B0 (System B) |
-| Application | number 1, version 3 |
+| Application | number 1, version 4 |
 
 ## Diagnostics over RTT
 
@@ -140,6 +150,7 @@ tools/scripts/rtt_console.sh build/logs/session.log 30 "1:a 2:s"
 | `i` | Raw input pin levels (DI1 first) and the button |
 | `1`–`8` | Toggle that output locally and send its status |
 | `a` | Individual address, KNX serial number, lifecycle state (and trace drops with `H8I8O_TRACE`) |
+| `k` | The device certificate for ETS (serial number and Factory Tool Key), whether Data Secure is on, and whether the tool key in force is the FDSK or one from ETS |
 | `R` | Restart, storing the output states first |
 | `b<area>.<line>.<device>,<count>,<gap ms>;` | Bus test: send `count` A_DeviceDescriptor_Read to that device, `gap` ms apart, each after the TP-UART2 has confirmed the last; then print how many were confirmed, refused busy, failed or timed out |
 | `x` | Stop a running bus test |

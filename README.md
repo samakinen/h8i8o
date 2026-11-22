@@ -19,6 +19,9 @@ and eight switching outputs.
   states are stored.
 - Programming button and LED. Programming mode ends by itself after 15 minutes; holding the
   button for 10 seconds does a factory reset.
+- KNX Data Secure (application version 4): secured group communication and a secure ETS
+  download, with a Factory Tool Key the device makes itself and a device certificate for ETS
+  ([docs/data-secure.md](docs/data-secure.md)).
 - Safe start: the outputs are driven inactive first thing after reset.
 - Watchdog, and diagnostics over SEGGER RTT through the debug probe.
 
@@ -38,8 +41,8 @@ group telegrams. Before you use it, note that:
   pin map and are assumed to behave the same. The ratings of the input and output stages, and
   what the I/O board connects to them, are not characterised: check yours before connecting
   loads, especially mains loads.
-- Extended frames (application version 3, APDU length 55) are new on this board: check the
-  ETS download first if something fails.
+- KNX Data Secure (application version 4) is new and has not yet run on the board with ETS6;
+  [docs/data-secure.md](docs/data-secure.md) lists what to check.
 - Programming the firmware destroys the factory firmware for good (see below).
 
 ## Repository layout
@@ -162,6 +165,9 @@ The log starts with `h8i8o start` and `started, address …`.
    LED lights while programming mode is on.
 4. Download the application, then link group addresses to the objects.
 
+For KNX Data Secure, ETS also needs the device certificate, which the RTT command `k` prints:
+[docs/data-secure.md](docs/data-secure.md#commissioning-with-ets6).
+
 Details: [docs/application.md](docs/application.md#commissioning-with-ets6).
 
 ## Possible future improvements
@@ -178,8 +184,6 @@ The module's hardware allows considerably more than this firmware does. Candidat
 - **Device**: LED patterns for "not loaded" and "transceiver not ready", an "in operation"
   heartbeat object.
 - The DIAUX and AUX signals, once their electrical function is known.
-- KNX Data Secure. It fits the 128 KiB flash and 20 KiB RAM; what is done and what is left
-  is in [docs/data-secure.md](docs/data-secure.md).
 - Moving the board support onto KNstaX's GD32F1 reference port (`ports/gd32f1`), which
   covers the same MCU.
 - A registered manufacturer ID, for a product that can be distributed.
