@@ -49,7 +49,7 @@ On this board (application version 3):
 - Tested on the board with ETS6: downloads with 55-octet extended frames, a bus power cut with
   an output set to restore, the factory reset and commissioning again afterwards.
 
-In KNstaX (branch `memory-reductions`):
+In KNstaX (`main`):
 
 - The memory reductions: KNstaX RAM in the tp1-small reference device 13.3 → 7.8 KiB.
 - The portable AES backend, chosen in Kconfig (`KNX_AES_BACKEND`: software, mbedTLS or the ESP32
