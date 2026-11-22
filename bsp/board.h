@@ -34,9 +34,9 @@ extern "C" {
 #ifndef H8I8O_BUTTON_ACTIVE_LOW
 #define H8I8O_BUTTON_ACTIVE_LOW 1
 #endif
-/* KNX LED PA12, active high. */
-#ifndef H8I8O_LED_ACTIVE_HIGH
-#define H8I8O_LED_ACTIVE_HIGH 1
+/* KNX LED PA12, active low. */
+#ifndef H8I8O_LED_ACTIVE_LOW
+#define H8I8O_LED_ACTIVE_LOW 1
 #endif
 
 #define H8I8O_CORE_HZ 48000000u

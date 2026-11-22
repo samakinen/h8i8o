@@ -175,10 +175,10 @@ bool board_button_pressed(void)
 
 void board_set_led(bool on)
 {
-#if H8I8O_LED_ACTIVE_HIGH
-    const bool high = on;
-#else
+#if H8I8O_LED_ACTIVE_LOW
     const bool high = !on;
+#else
+    const bool high = on;
 #endif
     GPIOA_BOP = high ? (1u << 12) : (1u << (12 + 16));
 }

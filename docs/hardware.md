@@ -31,7 +31,7 @@ separately.
 | TP-UART2 host link TX / RX | PA9 / PA10 (USART1) | 19200 baud, 8 data bits, even parity, 1 stop bit | Measured |
 | TP-UART2 `SAVE` | PB15 | Input with pull-up, EXTI line 15 on both edges; low while the bus voltage is failing | Traced on the board; high with bus power measured |
 | Programming button | PA11 | Input, internal pull-up; active low | Measured |
-| KNX LED | PA12 | Push-pull output; active high | Measured |
+| KNX LED | PA12 | Push-pull output; active low | Measured |
 | DI1 | PA15 | Input, internal pull-up; active low (contact to GND) | Measured |
 | DI2–DI8 | PB3–PB9 | As DI1 | As DI1 |
 | DO1 | PA0 | Push-pull output; active high, 0 V when off and after reset, 3.3 V when on (no load) | Measured |
