@@ -16,3 +16,6 @@ compile_commands.json
 
 # Vendor datasheets: not ours to redistribute
 docs/datasheets/
+
+# Device certificates saved by tools/scripts/flash.sh (they hold the Factory Tool Key)
+h8i8o-*.cert.txt

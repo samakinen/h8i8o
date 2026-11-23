@@ -25,7 +25,8 @@
  * Tool Key (FDSK) from its random source and keeps it in the flash log, among
  * the product's own records, which neither a factory reset nor a firmware
  * update with a new persistence layout erases. ETS needs it as the device
- * certificate, which the k command prints. The random source (S-A_Sync
+ * certificate, which the log prints at every start (and the k command on
+ * request). The random source (S-A_Sync
  * responses, the FDSK) is AES in counter mode, seeded at every start from ADC
  * noise, the unique ID and a start counter (knx::security::SeededRandom).
  *
@@ -236,7 +237,7 @@ void loadOrMakeFdsk() {
         rlog() << "factory tool key NOT stored: " << static_cast<uint32_t>(saved.error());
         return;
     }
-    rlog() << "factory tool key made: print the device certificate with k";
+    rlog() << "factory tool key made";
 }
 
 // ── Inputs and outputs ──────────────────────────────────────────────────────
@@ -725,6 +726,25 @@ void followButton(App& app, uint32_t now) {
 }
 
 // ── Start-up and main loop ──────────────────────────────────────────────────
+// The device certificate: what ETS asks for when a secure device is added to
+// a project (serial number and FDSK). Printed at every start and by the k
+// command, on the debug probe's channel: the only one the board has besides
+// the bus, and the one whoever installs this firmware has a probe on. It is
+// the FDSK in clear, which is no secret from someone holding the device
+// (docs/data-secure.md, "What Data Secure protects").
+template <typename App>
+[[gnu::noinline]] void printCertificate(App& app) {
+    const auto serial = app.deviceObject().getSerialNumber();
+    if (serial.size() != 6u) {
+        rlog() << "device certificate: no serial number";
+        return;
+    }
+    const auto text = knx::security::formatDeviceCertificate(std::span<const uint8_t, 6>(serial.data(), 6), g_fdsk);
+    rlog() << "device certificate " << text.data();
+    rlog() << "data secure " << (app.isSecurityEnabled() ? "on" : "off") << ", tool key "
+           << (app.toolKeyInForceIs(g_fdsk) ? "FDSK" : "from ETS (the FDSK is back after a factory reset)");
+}
+
 // Start-up runs once, in a frame of its own (startDevice), so its locals (the
 // bindings being built, the start result) are gone before the loop starts.
 // The loop's jobs that log or publish are functions of their own as well:
@@ -815,8 +835,7 @@ using Backend = knx::physical::TpUartMediumBackend;
              << ", heap " << static_cast<uint32_t>(g_heap_high_water)
              << (app->parametersLoaded() ? ", parameters loaded" : ", parameters NOT loaded (defaults)");
     }
-    rlog() << "data secure " << (app->isSecurityEnabled() ? "on" : "off") << ", tool key "
-           << (app->toolKeyInForceIs(g_fdsk) ? "FDSK (k prints the device certificate)" : "from ETS");
+    printCertificate(*app);
     backendOut = backend;
     return app;
 }
@@ -858,22 +877,6 @@ template <typename App>
         if (!sent) break;  // the send pipeline is full: next pass
         g_statusDirty = static_cast<uint8_t>(g_statusDirty & ~(1u << ch));
     }
-}
-
-// The device certificate: what ETS asks for when a secure device is added to
-// a project (serial number and FDSK). It is the FDSK in clear, so it is only
-// printed when asked for, on the debug probe's channel.
-template <typename App>
-[[gnu::noinline]] void printCertificate(App& app) {
-    const auto serial = app.deviceObject().getSerialNumber();
-    if (serial.size() != 6u) {
-        rlog() << "device certificate: no serial number";
-        return;
-    }
-    const auto text = knx::security::formatDeviceCertificate(std::span<const uint8_t, 6>(serial.data(), 6), g_fdsk);
-    rlog() << "device certificate " << text.data();
-    rlog() << "data secure " << (app.isSecurityEnabled() ? "on" : "off") << ", tool key "
-           << (app.toolKeyInForceIs(g_fdsk) ? "FDSK" : "from ETS (the FDSK is back after a factory reset)");
 }
 
 // The RTT command channel (the commands are listed at the top of this file).
