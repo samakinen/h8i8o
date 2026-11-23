@@ -22,8 +22,9 @@ Everything is register-level C and C++23; there is no vendor HAL. KNstaX is buil
 `tp1-small` profile and `knx.defconfig` on top: TP1 only, 64 group addresses, 96
 associations, APDU length 55 (extended frames, which KNX Data Secure needs), and KNX Data
 Secure with the software AES and fixed key tables (64 group keys, 16 senders, 2 point-to-point
-keys). The product file is built with the same `knx.defconfig`, so it declares what the
-firmware implements; [data-secure.md](data-secure.md) describes the Data Secure part.
+keys), which brings in the extended memory services and the group object diagnostics ETS uses
+with a secure device. The product file is built with the same `knx.defconfig`, so it declares
+what the firmware implements; [data-secure.md](data-secure.md) describes the Data Secure part.
 
 Build options (`cmake -D<option>=ON`):
 
@@ -74,11 +75,12 @@ The device is on the bus about 15 ms after reset.
 | Flash | `0x0801_E000` | 8 KiB | Persistence: two banks of four 1 KiB pages |
 | RAM | `0x2000_0000` | 20 KiB | 5 KiB stack at the bottom, then `.data` (with the flash erase routine), `.bss` and the heap |
 
-Use in this release (application version 4): image 115,240 B (94 % of the 120 KiB region),
+Use in this release (application version 4): image 118,648 B (97 % of the 120 KiB region),
 static RAM 1,304 B (4,504 B with `H8I8O_TRACE`) besides the stack. On the board, `s` prints
-the heap after start and the stack peak. Application version 3, without Data Secure,
-measured 7,660 B of heap and a 1,760 B stack peak; a secured telegram adds about 1.3 KiB of
-stack, hence the 5 KiB reserve.
+the heap after start and the stack peak: 9,744 B of heap, and a 3,388 B stack peak after a
+secure download and secured group traffic (application version 3, without Data Secure:
+7,660 B and 1,760 B). Secured telegrams account for the difference, hence the 5 KiB
+reserve.
 
 The stack grows down towards the start of RAM. One that overflows its reserve runs into the
 reserved addresses below `0x2000_0000` and faults; the watchdog resets the device, and the

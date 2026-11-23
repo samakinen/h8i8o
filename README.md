@@ -41,8 +41,9 @@ group telegrams. Before you use it, note that:
   pin map and are assumed to behave the same. The ratings of the input and output stages, and
   what the I/O board connects to them, are not characterised: check yours before connecting
   loads, especially mains loads.
-- KNX Data Secure (application version 4) is new and has not yet run on the board with ETS6;
-  [docs/data-secure.md](docs/data-secure.md) lists what to check.
+- KNX Data Secure (application version 4) has run on the board with ETS6 (secure
+  commissioning, a secured download, secured group communication). The keys are kept in flash
+  without read protection; [docs/data-secure.md](docs/data-secure.md) lists what is open.
 - Programming the firmware destroys the factory firmware for good (see below).
 
 ## Repository layout
