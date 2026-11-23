@@ -21,8 +21,10 @@ still open.
   flash log among the firmware's own records (0x7F01). Neither a factory reset (Master Reset
   02h) nor a firmware update with a new persistence layout erases it; only a full erase of the
   flash does, which makes a new key and a new device certificate.
-- **Device certificate**: the RTT command `k` prints it, with the Data Secure state. It is
-  the serial number and the FDSK in the form ETS asks for (36 characters, six groups of six).
+- **Device certificate**: the RTT log prints it at every start, with the Data Secure state,
+  and the command `k` on request; `tools/scripts/flash.sh` reads it after programming and saves
+  it. It is the serial number and the FDSK in the form ETS asks for (36 characters, six groups
+  of six).
 - **Random source** (the S-A_Sync random and the FDSK): AES-128 in counter mode, keyed at
   every start from 1024 conversions of the temperature sensor and V<sub>REFINT</sub> (their low
   bits are noise), the MCU's unique ID, the time and a start counter kept in flash (0x7F02),
@@ -41,9 +43,11 @@ still open.
 
 1. Build and import the product file of version 4
    ([tools/knxprod/README.md](../tools/knxprod/README.md)).
-2. Read the device certificate: connect the debug probe, open the RTT console and send `k`.
-   The line `device certificate XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX` is what ETS needs;
-   the next line should say `tool key FDSK`.
+2. Note the device certificate. `tools/scripts/flash.sh` prints it after programming and saves
+   it as `h8i8o-<serial>.cert.txt`; write it on a label on the device, where a commercial
+   device has its certificate printed. Later the RTT log shows it at every start (the line
+   `device certificate XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX`), and the command `k` prints
+   it on request. The next line says `tool key FDSK` until ETS has commissioned the device.
 3. In ETS6, add the device to a project that has a project password, and enter the device
    certificate for it (ETS asks for it when the device is added, or later in the device's
    properties).
@@ -61,14 +65,32 @@ individual address as the sender of the write.
 A factory reset (the button, 10 s) returns the device to the FDSK with Security Mode off, so
 ETS can commission it again with the same certificate.
 
-Keep the device certificate with the device: it is the key to it until ETS has installed its
-own. It is printed only when asked for, and only over the debug probe.
+Keep the device certificate with the device, and out of version control (the repository
+ignores `h8i8o-*.cert.txt`): it is the key to the device until ETS has installed its own, and
+again after a factory reset.
+
+## What Data Secure protects
+
+Data Secure protects the bus: telegrams are authenticated, and encrypted where ETS sets it, so
+a device on the bus without the keys can neither read them nor send ones the others accept.
+It does not protect a device in someone's hands. Whoever can open the H8i8o can switch its
+outputs directly and reprogram it over the debug pads, so the firmware does not set the flash
+read protection: it would add nothing against that, and it would end the RTT diagnostics and
+reprogramming without a full erase.
+
+The keys are therefore readable from the flash by anyone with a probe. For the device's own
+keys (the FDSK and the tool key from ETS) that gives nothing beyond what physical access
+already gives. The group keys are different: a group key belongs to a group address, and every
+device on that address holds it. Someone who reads them from one H8i8o can, with access to the
+bus anywhere, read and send secured telegrams on those addresses for the other devices too. It
+matters where the H8i8o shares a secured group address with something sensitive and is easier
+to reach than the bus itself.
 
 ## Memory
 
 | | Application version 3 | Version 4, Data Secure |
 |---|---:|---:|
-| Flash (120 KiB image region = 122,880 B) | 95,756 B | 118,648 B (4,232 B free) |
+| Flash (120 KiB image region = 122,880 B) | 95,756 B | 118,396 B (4,484 B free) |
 | Static RAM | 1,208 B + 3 KiB stack | 1,304 B + 5 KiB stack |
 | Heap after start | 7,660 B | 9,744 B |
 | Stack peak | 1,760 B | 3,388 B (secure download and secured group traffic) |
@@ -80,13 +102,8 @@ leaves about 10.8 KB for the heap: enough, but with only about 1 KB of margin.
 
 ## Open points
 
-- **Flash.** 4,232 B of the image region are left; a feature that needs more has to make
+- **Flash.** 4,484 B of the image region are left; a feature that needs more has to make
   room first.
-- **Read protection.** The keys are in flash in plain form, and anyone with a probe on the
-  `D C G V` pads can read them. A secured installation needs the option bytes' read
-  protection set after programming. It also ends reading the flash over SWD, and the firmware
-  does not set it: whether RTT diagnostics still work with it has to be checked on this part
-  first.
 - **The noise source** is the ADC's conversion noise at the shortest sampling time. Its
   entropy has not been measured on the board; the start counter keeps the S-A_Sync random
   from repeating either way, but the FDSK's unpredictability rests on the noise.

@@ -42,8 +42,9 @@ group telegrams. Before you use it, note that:
   what the I/O board connects to them, are not characterised: check yours before connecting
   loads, especially mains loads.
 - KNX Data Secure (application version 4) has run on the board with ETS6 (secure
-  commissioning, a secured download, secured group communication). The keys are kept in flash
-  without read protection; [docs/data-secure.md](docs/data-secure.md) lists what is open.
+  commissioning, a secured download, secured group communication). It protects the bus, not a
+  device in someone's hands; [docs/data-secure.md](docs/data-secure.md) explains that and lists
+  what is open.
 - Programming the firmware destroys the factory firmware for good (see below).
 
 ## Repository layout
@@ -135,8 +136,10 @@ Then disconnect the board from the bus for a few seconds, so the change takes ef
 tools/scripts/flash.sh build/fw/h8i8o.elf
 ```
 
-The script retries the attach, programs, verifies and starts the firmware. Programming
-leaves the persistence pages alone, so the device keeps its ETS configuration across
+The script retries the attach, programs, verifies and starts the firmware. It then reads the
+device certificate that ETS needs for KNX Data Secure, prints it and saves it as
+`h8i8o-<serial>.cert.txt` (in `CERT_DIR`, by default the current directory): put it on a label
+on the device. Programming leaves the persistence pages alone, so the device keeps its ETS configuration across
 firmware updates as long as the product's objects stay the same.
 
 **Back to factory state** (address 15.15.255, no configuration): hold the programming button
@@ -166,7 +169,8 @@ The log starts with `h8i8o start` and `started, address …`.
    LED lights while programming mode is on.
 4. Download the application, then link group addresses to the objects.
 
-For KNX Data Secure, ETS also needs the device certificate, which the RTT command `k` prints:
+For KNX Data Secure, ETS also needs the device certificate, which `flash.sh` saves after
+programming and the RTT log shows at every start:
 [docs/data-secure.md](docs/data-secure.md#commissioning-with-ets6).
 
 Details: [docs/application.md](docs/application.md#commissioning-with-ets6).

@@ -75,7 +75,7 @@ The device is on the bus about 15 ms after reset.
 | Flash | `0x0801_E000` | 8 KiB | Persistence: two banks of four 1 KiB pages |
 | RAM | `0x2000_0000` | 20 KiB | 5 KiB stack at the bottom, then `.data` (with the flash erase routine), `.bss` and the heap |
 
-Use in this release (application version 4): image 118,648 B (97 % of the 120 KiB region),
+Use in this release (application version 4): image 118,396 B (96 % of the 120 KiB region),
 static RAM 1,304 B (4,504 B with `H8I8O_TRACE`) besides the stack. On the board, `s` prints
 the heap after start and the stack peak: 9,744 B of heap, and a 3,388 B stack peak after a
 secure download and secured group traffic (application version 3, without Data Secure:
@@ -166,8 +166,8 @@ carries, so use the counters there. The requests come from the device's own addr
 are not part of its application.
 
 Log lines start with the time since boot in seconds. Besides the commands' output the log
-shows the reset cause and the stored address at start, lifecycle changes, parameter
-downloads, input and output changes, and raw input level changes.
+shows the reset cause, the stored address and the device certificate at start, lifecycle
+changes, parameter downloads, input and output changes, and raw input level changes.
 
 **Host link trace** (build option `H8I8O_TRACE`). Every octet between the MCU and the TP-UART2 is logged, one line per
 burst: `rx <ms>: …` from the chip, `tx <ms>: …` to it, where `<ms>` is the burst's start
