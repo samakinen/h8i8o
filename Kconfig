@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# H8i8o application options. A build variant (variants/<name>.defconfig) sets
+# them together with the KNstaX options it needs (CONFIG_KNX_*); see
+# cmake/h8i8o_variant.cmake and docs/design/channel-functions.md §3.5.
+#
+# The firmware and the ETS product file are built from the same variant, so a
+# function is offered in ETS exactly when the firmware has it.
+
+mainmenu "H8i8o application"
+
+menu "Product identity"
+
+config H8I8O_PRODUCT_KEY
+	string "Product key"
+	default "h8i8o"
+	help
+	  The catalogue product's key in the ETS product file. Each variant has
+	  its own, so ETS keeps them apart.
+
+config H8I8O_PRODUCT_NAME
+	string "Product name"
+	default "H8i8o 8 inputs 8 outputs"
+
+config H8I8O_APPLICATION_NUMBER
+	int "ETS application number"
+	range 1 65535
+	default 1
+
+config H8I8O_HARDWARE_SERIAL
+	int "Hardware serial number"
+	range 1 9999
+	default 1
+	help
+	  PID_HARDWARE_TYPE and the catalogue's Hardware/@SerialNumber. ETS
+	  checks one against the other before a download.
+
+endmenu
+
+menu "Input functions"
+
+config H8I8O_INPUT_DIMMING
+	bool "Dimming push button (object C, DPT 3.007)"
+	default y
+
+config H8I8O_INPUT_SHUTTER
+	bool "Shutter push button (DPT 1.008 and 1.007 on objects A and B)"
+	default y
+
+config H8I8O_INPUT_VALUE
+	bool "Value and scene transmitter (object D, one octet)"
+	default y
+
+config H8I8O_INPUT_COUNTER
+	bool "Pulse counter (object E, four octets)"
+	default y
+	help
+	  Counts are stored in flash when the bus power fails, before a planned
+	  restart and every 15 minutes while they change.
+
+endmenu
+
+menu "Output functions"
+
+config H8I8O_OUTPUT_FORCED
+	bool "Forced operation (object F, DPT 2.001)"
+	default y
+
+config H8I8O_OUTPUT_SCENES
+	bool "Scenes with learning, four per output (object V, DPT 18.001)"
+	default y
+
+config H8I8O_OUTPUT_VALVE
+	bool "Heating valve by pulse width (object V, DPT 5.001)"
+	default y
+
+endmenu
+
+menu "Diagnostics"
+
+config H8I8O_BUS_TEST
+	bool "Bus test generator on the RTT terminal (b, x)"
+	default n
+	help
+	  Sends bursts of A_DeviceDescriptor_Read to another device, for
+	  testing the bus and the TP-UART2 on the bench.
+
+endmenu

@@ -1,0 +1,22 @@
+# The extended variant: every function, without KNX Data Secure (which takes
+# about 22 KB of flash). docs/design/channel-functions.md §3.5.
+#
+# CONFIG_KNX_* lines go to KNstaX on top of knx.defconfig, CONFIG_H8I8O_* lines
+# to the H8i8o Kconfig.
+
+# KNX_ENABLE_SECURITY off also drops what it selected: the extended memory and
+# property services and the group object diagnostics.
+# CONFIG_KNX_ENABLE_SECURITY is not set
+
+CONFIG_H8I8O_PRODUCT_KEY="h8i8o_x"
+CONFIG_H8I8O_PRODUCT_NAME="H8i8o 8 inputs 8 outputs, extended"
+CONFIG_H8I8O_APPLICATION_NUMBER=2
+CONFIG_H8I8O_HARDWARE_SERIAL=2
+
+CONFIG_H8I8O_INPUT_DIMMING=y
+CONFIG_H8I8O_INPUT_SHUTTER=y
+CONFIG_H8I8O_INPUT_VALUE=y
+CONFIG_H8I8O_INPUT_COUNTER=y
+CONFIG_H8I8O_OUTPUT_FORCED=y
+CONFIG_H8I8O_OUTPUT_SCENES=y
+CONFIG_H8I8O_OUTPUT_VALVE=y

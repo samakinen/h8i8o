@@ -102,8 +102,11 @@ leaves about 10.8 KB for the heap: enough, but with only about 1 KB of margin.
 
 ## Open points
 
-- **Flash.** 4,484 B of the image region are left; a feature that needs more has to make
-  room first.
+- **Flash.** Application version 5 leaves 1,848 B of the image region free in the `standard`
+  variant (less with Ubuntu's toolchain), and leaves the pulse counters, output scenes and
+  forced operation out for lack of room; the `extended` variant has every function and no
+  Data Secure ([firmware.md](firmware.md#memory)). A feature that needs more has to make room
+  first, or go into `extended` only.
 - **The noise source** is the ADC's conversion noise at the shortest sampling time. Its
   entropy has not been measured on the board; the start counter keeps the S-A_Sync random
   from repeating either way, but the FDSK's unpredictability rests on the noise.

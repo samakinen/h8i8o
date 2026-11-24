@@ -8,7 +8,9 @@
 #   cmake --build build/fw
 #
 # KNSTAX_DIR may point at another KNstaX checkout; the default is the
-# submodule.
+# submodule. H8I8O_VARIANT picks the build variant: standard (the default,
+# with KNX Data Secure) or extended (every function, without Data Secure), or
+# a path to a variant file of your own (docs/design/channel-functions.md §3.5).
 
 cmake_minimum_required(VERSION 3.21)
 project(h8i8o LANGUAGES C CXX)
@@ -23,8 +25,12 @@ option(H8I8O_LTO "Link with -flto" ON)
 # host link (an ETS download, say); it costs about 3.6 KiB of RAM.
 option(H8I8O_TRACE "Trace the host link over RTT" OFF)
 
+set(H8I8O_VARIANT "standard" CACHE STRING "Build variant: a name under variants/ or a variant file")
+
+include(cmake/h8i8o_variant.cmake)
+h8i8o_variant(${H8I8O_VARIANT})
 include(${KNSTAX_DIR}/cmake/knx_config.cmake)
-knx_configure(PROFILE tp1-small OVERRIDES ${CMAKE_CURRENT_LIST_DIR}/knx.defconfig)
+knx_configure(PROFILE tp1-small OVERRIDES ${CMAKE_CURRENT_LIST_DIR}/knx.defconfig ${H8I8O_KNX_FRAGMENT})
 add_subdirectory(${KNSTAX_DIR} knstax EXCLUDE_FROM_ALL)
 
 add_executable(h8i8o
@@ -35,8 +41,10 @@ add_executable(h8i8o
     bsp/gd32_fmc.c
     bsp/rtt.c
     app/main.cpp
+    app/logic/input_channel.cpp
+    app/logic/output_channel.cpp
 )
-target_include_directories(h8i8o PRIVATE bsp app)
+target_include_directories(h8i8o PRIVATE bsp app ${H8I8O_CONFIG_INCLUDE_DIR})
 target_compile_definitions(h8i8o PRIVATE H8I8O_TRACE=$<IF:$<BOOL:${H8I8O_TRACE}>,1,0>)
 target_compile_features(h8i8o PRIVATE cxx_std_23)
 target_compile_options(h8i8o PRIVATE -g -Wall -Wextra)

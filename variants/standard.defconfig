@@ -1,0 +1,25 @@
+# The standard variant: KNX Data Secure, and the functions that fit next to it
+# with room to spare. docs/design/channel-functions.md §9 has the figures:
+# with every function the image is 384 B over the 120 KiB region with the Arm
+# GNU Toolchain, and Ubuntu's toolchain (tools/docker) builds about 1.2 KB
+# larger. Left out, the most specialised and the largest first: the pulse
+# counters (about 1.1 KB), output scenes (about 0.8 KB) and forced operation
+# (about 0.3 KB). The extended variant has them.
+#
+# CONFIG_KNX_* lines go to KNstaX on top of knx.defconfig, CONFIG_H8I8O_* lines
+# to the H8i8o Kconfig. A function left out here is not offered in ETS either.
+
+CONFIG_KNX_ENABLE_SECURITY=y
+
+CONFIG_H8I8O_PRODUCT_KEY="h8i8o"
+CONFIG_H8I8O_PRODUCT_NAME="H8i8o 8 inputs 8 outputs"
+CONFIG_H8I8O_APPLICATION_NUMBER=1
+CONFIG_H8I8O_HARDWARE_SERIAL=1
+
+CONFIG_H8I8O_INPUT_DIMMING=y
+CONFIG_H8I8O_INPUT_SHUTTER=y
+CONFIG_H8I8O_INPUT_VALUE=y
+# CONFIG_H8I8O_INPUT_COUNTER is not set
+# CONFIG_H8I8O_OUTPUT_FORCED is not set
+# CONFIG_H8I8O_OUTPUT_SCENES is not set
+CONFIG_H8I8O_OUTPUT_VALVE=y

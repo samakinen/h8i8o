@@ -10,16 +10,26 @@ and eight switching outputs.
 - Commissioned with ETS6 like any KNX device: individual address by programming button,
   application download, group communication. Configuration is kept in flash across
   restarts and bus power cuts.
-- **8 inputs** (DI1–DI8). Each sends its state (DPT 1.001) on change and answers reads.
-  Per input: enabled or disabled, normally open or normally closed, debounce time 10–200 ms.
-- **8 outputs** (DO1–DO8), each with a switch object and a status object (DPT 1.001). Per
-  output: enabled or disabled, normally open or normally closed operation, status sent on
-  change or not at all, released or restored after a restart or bus power failure.
+- **8 inputs** (DI1–DI8), each with a function chosen in ETS: switch (an action per edge),
+  alarm, window/door, presence or open/close contact, short and long press, dimming, shutter,
+  value or percentage, scene, and (in the `extended` variant) pulse counter or energy meter.
+  Every input can be locked, sent cyclically and sent after a start; normally open or
+  normally closed, debounce time 10–200 ms.
+- **8 outputs** (DO1–DO8), each with a function: switch with on and off delays, staircase
+  light with a warning, pulse, or heating valve by pulse width. Every output has a status
+  object, a lock and the central switch, and in the `extended` variant forced operation and
+  four scenes with learning; normally open or normally closed operation, released or restored
+  after a restart or bus power failure.
+- Device: "in operation" heartbeat, a delay before sending after a start, a telegram limit.
+- ETS shows only the objects and parameters a channel's function uses, each object with the
+  datapoint type that function sends.
+- Two build variants: `standard` with KNX Data Secure, `extended` with every function and
+  without Data Secure ([docs/firmware.md](docs/firmware.md#build-variants)).
 - Bus power failure: the outputs are released as soon as the TP-UART2 warns of it, and their
-  states are stored.
+  states (and the counters) are stored.
 - Programming button and LED. Programming mode ends by itself after 15 minutes; holding the
   button for 10 seconds does a factory reset.
-- KNX Data Secure (application version 4): secured group communication and a secure ETS
+- KNX Data Secure (`standard` variant): secured group communication and a secure ETS
   download, with a Factory Tool Key the device makes itself and a device certificate for ETS
   ([docs/data-secure.md](docs/data-secure.md)).
 - Safe start: the outputs are driven inactive first thing after reset.
@@ -41,6 +51,10 @@ group telegrams. Before you use it, note that:
   pin map and are assumed to behave the same. The ratings of the input and output stages, and
   what the I/O board connects to them, are not characterised: check yours before connecting
   loads, especially mains loads.
+- **The channel functions of application version 5 have not run on a board yet.** They are
+  tested on the host, and both variants build and produce schema-valid product files; the
+  ETS6 import, the downloads and the heap after start still need checking on the board
+  ([docs/application.md](docs/application.md#checking-a-download-on-the-board)).
 - KNX Data Secure (application version 4) has run on the board with ETS6 (secure
   commissioning, a secured download, secured group communication). It protects the bus, not a
   device in someone's hands; [docs/data-secure.md](docs/data-secure.md) explains that and lists
@@ -51,8 +65,10 @@ group telegrams. Before you use it, note that:
 
 | Path | Content |
 |---|---|
-| `app/` | The product definition (`product.hpp`) and the application (`main.cpp`) |
+| `app/` | The product definition (`product.hpp`), the channel functions (`logic/`) and the glue to the board and the bus (`main.cpp`) |
 | `knx.defconfig` | KNstaX capacities and APDU length, for the firmware and the product file |
+| `Kconfig`, `variants/` | Application options and the build variants (`standard`, `extended`) |
+| `test/` | Host tests of the channel functions |
 | `bsp/`, `startup/` | Board support, start-up code and linker script |
 | `external/KNstaX/` | The KNX stack (git submodule) |
 | `docs/` | [Application](docs/application.md), [hardware](docs/hardware.md), [firmware internals](docs/firmware.md) |
@@ -100,6 +116,11 @@ docker run --rm -v "$PWD":/work -w /work h8i8o-arm sh -c \
 
 On Git Bash for Windows, prefix `docker run` with `MSYS_NO_PATHCONV=1`. The result is
 `build/fw/h8i8o.elf` (and `h8i8o.bin`, to be written at `0x08000000`).
+
+That builds the `standard` variant, with KNX Data Secure. For the `extended` one (every
+function, no Data Secure) add `-DH8I8O_VARIANT=extended`, preferably into another build
+directory, and build the product file with the same variant
+([docs/firmware.md](docs/firmware.md#build-variants)).
 
 Add `-DH8I8O_TRACE=ON` to the first `cmake` for the host link trace: every octet between the
 MCU and the TP-UART2 in the RTT log, for diagnosing an ETS download. It costs about 3 KiB of

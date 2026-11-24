@@ -6,9 +6,15 @@
  * One main loop plus three interrupts: USART1 receive (the TP-UART2's octets
  * and the acknowledge decision, in KNstaX's backend), the TP-UART2's SAVE edge
  * (bus power failing) and SysTick (1 ms). The loop runs the stack, the flash
- * log's background step, the input scan and debounce, the programming button,
- * the RTT command channel and the watchdog, then sleeps until the next
- * interrupt.
+ * log's background step, the input scan and debounce, the channel logic, the
+ * programming button, the RTT command channel and the watchdog, then sleeps
+ * until the next interrupt.
+ *
+ * Channels: what each input and output does is the channel logic's
+ * (app/logic, docs/design/channel-functions.md). This file is the glue: it
+ * decodes the parameters into the logic's configuration, binds the objects to
+ * it, turns what it sends into telegrams, drives the pins from what it says,
+ * and keeps the output states and the counters in flash.
  *
  * Programming button: a press toggles programming mode, which also ends by
  * itself after 15 minutes. Held for 10 s the LED flashes fast; released while
@@ -17,16 +23,15 @@
  *
  * Bus power failure: SAVE releases every output at once, from the interrupt,
  * so the loads stop draining the bus capacitors; the loop then stores the
- * outputs' switch values in the flash log, for the outputs set to restore
- * them. If the bus comes back before the supply gives out, the outputs return
- * to their switch values.
+ * outputs' switch values (and the counters) in the flash log. If the bus
+ * comes back before the supply gives out, the outputs follow the logic again.
  *
- * KNX Data Secure: at the first start the firmware makes the device's Factory
- * Tool Key (FDSK) from its random source and keeps it in the flash log, among
- * the product's own records, which neither a factory reset nor a firmware
- * update with a new persistence layout erases. ETS needs it as the device
- * certificate, which the log prints at every start (and the k command on
- * request). The random source (S-A_Sync
+ * KNX Data Secure (variants with KNX_SECURE_ENABLED): at the first start the
+ * firmware makes the device's Factory Tool Key (FDSK) from its random source
+ * and keeps it in the flash log, among the product's own records, which
+ * neither a factory reset nor a firmware update with a new persistence layout
+ * erases. ETS needs it as the device certificate, which the log prints at
+ * every start (and the k command on request). The random source (S-A_Sync
  * responses, the FDSK) is AES in counter mode, seeded at every start from ADC
  * noise, the unique ID and a start counter (knx::security::SeededRandom).
  *
@@ -38,13 +43,14 @@
  *   p  toggle programming mode (as the button does)
  *   s  print statistics
  *   i  print the raw input levels
- *   1-8 toggle that output locally and send its status
+ *   1-8 toggle that output's switch value locally
  *   a  print the individual address, device serial, lifecycle state (and trace drops)
  *   k  print the device certificate (serial number and FDSK, for ETS) and the
- *      Data Secure state
+ *      Data Secure state (Data Secure variants)
  *   R  restart
  *   b<area>.<line>.<device>,<count>,<gap ms>;  send that many A_DeviceDescriptor_Read
- *      to the device (a bus test generator, see stepBurst); x stops it
+ *      to the device (a bus test generator, see stepBurst; CONFIG_H8I8O_BUS_TEST);
+ *      x stops it
  *
  * Built with H8I8O_TRACE=ON, every octet on the host link is logged too
  * (printTrace), one line per burst.
@@ -57,14 +63,20 @@
 #include "rtt.h"
 #include "usart1.h"
 
+#include "logic/debounce.hpp"
+#include "logic/input_channel.hpp"
+#include "logic/output_channel.hpp"
+
 #include "knx/objects/flash_log.hpp"
 #include "knx/objects/flash_log_persistence.hpp"
 #include "knx/objects/interface_object_manager.hpp"
 #include "knx/objects/object_persistence.hpp"
 #include "knx/physical/tpuart_medium_backend.hpp"
 #include "knx/platform/cooperative_platform.hpp"
+#if KNX_SECURE_ENABLED
 #include "knx/security/device_certificate.hpp"
 #include "knx/security/seeded_random.hpp"
+#endif
 #include "knx/util/heap.hpp"
 
 #include <algorithm>
@@ -176,9 +188,22 @@ constexpr uint16_t kProductKeyFirst = knx::objects::InterfaceObjectManager::kPro
 constexpr uint16_t kOutputStateKey = kProductKeyFirst;       // output switch values
 constexpr uint16_t kFdskKey = kProductKeyFirst + 1u;         // Factory Tool Key, 16 octets
 constexpr uint16_t kStartCounterKey = kProductKeyFirst + 2u; // starts so far, 4 octets
+constexpr uint16_t kCounterKey = kProductKeyFirst + 3u;      // input counters, 8 × 4 octets
+
+uint32_t loadU32(const uint8_t* p) {
+    return static_cast<uint32_t>(p[0]) << 24 | static_cast<uint32_t>(p[1]) << 16 |
+           static_cast<uint32_t>(p[2]) << 8 | p[3];
+}
+void storeU32(uint8_t* p, uint32_t value) {
+    p[0] = static_cast<uint8_t>(value >> 24);
+    p[1] = static_cast<uint8_t>(value >> 16);
+    p[2] = static_cast<uint8_t>(value >> 8);
+    p[3] = static_cast<uint8_t>(value);
+}
 
 // ── Random source and Factory Tool Key (KNX Data Secure) ────────────────────
 
+#if KNX_SECURE_ENABLED
 knx::security::SeededRandom g_random;
 std::array<uint8_t, 16> g_fdsk{};
 
@@ -191,13 +216,10 @@ void hookRandom(void*, uint8_t* out, size_t length) { g_random.fill(std::span<ui
 void seedRandom() {
     uint32_t starts = 0;
     std::vector<uint8_t> record;
-    if (g_flashLog.load(kStartCounterKey, record).isOk() && record.size() == 4u) {
-        starts = static_cast<uint32_t>(record[0]) << 24 | static_cast<uint32_t>(record[1]) << 16 |
-                 static_cast<uint32_t>(record[2]) << 8 | record[3];
-    }
+    if (g_flashLog.load(kStartCounterKey, record).isOk() && record.size() == 4u) starts = loadU32(record.data());
     ++starts;
-    const uint8_t counter[4] = {static_cast<uint8_t>(starts >> 24), static_cast<uint8_t>(starts >> 16),
-                                static_cast<uint8_t>(starts >> 8), static_cast<uint8_t>(starts)};
+    uint8_t counter[4];
+    storeU32(counter, starts);
     if (const auto saved = g_flashLog.save(kStartCounterKey, counter); saved.isError()) {
         rlog() << "start counter not stored: " << static_cast<uint32_t>(saved.error());
     }
@@ -239,152 +261,156 @@ void loadOrMakeFdsk() {
     }
     rlog() << "factory tool key made";
 }
+#endif  // KNX_SECURE_ENABLED
 
-// ── Inputs and outputs ──────────────────────────────────────────────────────
+// ── Channels ────────────────────────────────────────────────────────────────
 
 constexpr uint32_t kButtonDebounceMs = 50;
 
-// The parameters as the main loop uses them: one bit per channel. Loaded at
-// start and after every completed ETS download.
+InputChannel g_in[kChannels];
+OutputChannel g_out[kChannels];
+
+// What the glue itself needs of the parameters: one bit per channel, and the
+// device's settings. Loaded at start and after every completed ETS download
+// (and when the device changes a parameter itself: a learned scene).
 struct Config {
     uint8_t inputEnabled{0};
     uint8_t inputInverted{0};          // contact type "normally closed"
     uint8_t debounceMs[kChannels]{};
-    uint8_t outputEnabled{0};
+    uint8_t outputEnabled{0};          // function other than Disabled
     uint8_t outputNormallyClosed{0};   // operating mode: 1 = de-energise
     uint8_t statusEnabled{0};
     uint8_t restoreAtStart{0};         // state after a restart: as before
+    uint8_t central{0};                // follows the central switch
+    uint16_t cyclicS[kChannels]{};
+    uint16_t heartbeatS{0};
+    uint8_t startDelayS{0};
+    uint8_t rateLimit{0};
 };
 
 Config g_config;
+bool g_policiesDue = false;  // transmit policies to apply from the loop
 
 void loadConfig(params::ViewFor<kParameters> parameters) {
+    const uint32_t now = board_millis();
     Config config{};
+    const auto device = parameters.block<Dev>();
+    config.startDelayS = device.get<Dev::StartDelay>();
+    config.heartbeatS = device.get<Dev::Heartbeat>();
+    config.rateLimit = device.get<Dev::RateLimit>();
     for (unsigned ch = 0; ch < kChannels; ++ch) {
         const uint8_t bit = static_cast<uint8_t>(1u << ch);
         const auto in = parameters.block<In>(ch);
-        if (in.get<In::Function>() != InputFunction::Disabled) config.inputEnabled |= bit;
+        InputConfig ic{};
+        ic.function = in.get<In::Function>();
+        ic.onClose = in.get<In::OnClose>();
+        ic.onOpen = in.get<In::OnOpen>();
+        ic.shortAction = in.get<In::ShortAction>();
+        ic.longAction = in.get<In::LongAction>();
+        ic.longMs = static_cast<uint16_t>(in.get<In::LongTime>() * 100u);
+        ic.dimDirection = in.get<In::DimDirection>();
+        ic.shutterDirection = in.get<In::ShutterDirection>();
+        ic.value = in.get<In::Value>();
+        ic.scene = in.get<In::Scene>();
+        ic.pulsesPerUnit = in.get<In::PulsesPerUnit>();
+        ic.sendDelta = in.get<In::SendDelta>();
+        ic.lockEnabled = in.get<In::Lock>() == Use::Enabled;
+        ic.sendAfterStart = in.get<In::SendAfterStart>();
+        g_in[ch].configure(ic);
+        if (ic.function != InputFunction::Disabled) config.inputEnabled |= bit;
         if (in.get<In::Contact>() == ContactType::NormallyClosed) config.inputInverted |= bit;
         config.debounceMs[ch] = static_cast<uint8_t>(in.get<In::Debounce>());
+        config.cyclicS[ch] = in.get<In::Cyclic>();
 
         const auto out = parameters.block<Out>(ch);
-        if (out.get<Out::Channel>() == ChannelUse::Enabled) config.outputEnabled |= bit;
+        OutputConfig oc{};
+        oc.function = out.get<Out::Function>();
+        oc.onDelayS = out.get<Out::OnDelay>();
+        oc.offDelayS = out.get<Out::OffDelay>();
+        oc.staircaseS = out.get<Out::StairTime>();
+        oc.retrigger = out.get<Out::Retrigger>();
+        oc.offWithZero = out.get<Out::OffWithZero>();
+        oc.warningS = out.get<Out::Warning>();
+        oc.pulse100ms = out.get<Out::PulseLength>();
+        oc.lockEnabled = out.get<Out::Lock>() == Use::Enabled;
+        oc.lockStart = out.get<Out::LockStart>();
+        oc.lockEnd = out.get<Out::LockEnd>();
+        oc.central = out.get<Out::Central>();
+#if H8I8O_OUTPUT_SCENES
+        oc.sceneNumber[0] = out.get<Out::Scene1>();
+        oc.sceneOn[0] = out.get<Out::Scene1On>();
+        oc.sceneNumber[1] = out.get<Out::Scene2>();
+        oc.sceneOn[1] = out.get<Out::Scene2On>();
+        oc.sceneNumber[2] = out.get<Out::Scene3>();
+        oc.sceneOn[2] = out.get<Out::Scene3On>();
+        oc.sceneNumber[3] = out.get<Out::Scene4>();
+        oc.sceneOn[3] = out.get<Out::Scene4On>();
+#endif
+        oc.cycleMin = out.get<Out::Cycle>();
+        oc.monitorMin = out.get<Out::Monitor>();
+        oc.safetyPercent = out.get<Out::Safety>();
+        g_out[ch].configure(oc, now);
+        if (oc.function != OutputFunction::Disabled) config.outputEnabled |= bit;
         if (out.get<Out::Mode>() == OperatingMode::NormallyClosed) config.outputNormallyClosed |= bit;
         if (out.get<Out::Status>() != StatusObject::Disabled) config.statusEnabled |= bit;
         if (out.get<Out::Start>() == StartState::Restore) config.restoreAtStart |= bit;
+        if (oc.central) config.central |= bit;
     }
     g_config = config;
+    g_policiesDue = true;
 }
 
-// The inputs as the application sees them: contact type applied, a disabled
+// The inputs as the logic sees them: contact type applied, a disabled
 // channel reads inactive.
 uint8_t readLogicalInputs() {
     return static_cast<uint8_t>((board_read_inputs() ^ g_config.inputInverted) & g_config.inputEnabled);
 }
 
-// The outputs as the bus sees them: operating mode applied.
-uint8_t logicalOutputs() {
-    return static_cast<uint8_t>(board_outputs() ^ g_config.outputNormallyClosed);
-}
-
-struct Debounce {
-    uint8_t stable{0};
-    uint8_t candidate{0};
-    uint32_t since{0};
-    uint8_t lastRaw{0};
-
-    // Returns the bits that changed their stable value.
-    uint8_t update(uint8_t raw, uint32_t now, uint32_t holdMs) {
-        if (raw != candidate) {
-            candidate = raw;
-            since = now;
-            return 0u;
-        }
-        if (candidate == stable || now - since < holdMs) return 0u;
-        const uint8_t changed = static_cast<uint8_t>(stable ^ candidate);
-        stable = candidate;
-        return changed;
-    }
-};
-
-// Eight inputs, each with its own debounce time.
-struct InputDebounce {
-    uint8_t stable{0};
-    uint8_t candidate{0};
-    uint8_t lastRaw{0};
-    uint32_t since[kChannels]{};
-
-    // Returns the bits that changed their stable value.
-    uint8_t update(uint8_t raw, uint32_t now, const uint8_t* holdMs) {
-        uint8_t changed = 0;
-        for (unsigned ch = 0; ch < kChannels; ++ch) {
-            const uint8_t bit = static_cast<uint8_t>(1u << ch);
-            if (((raw ^ candidate) & bit) != 0u) {
-                candidate = static_cast<uint8_t>(candidate ^ bit);
-                since[ch] = now;
-            } else if (((candidate ^ stable) & bit) != 0u && now - since[ch] >= holdMs[ch]) {
-                stable = static_cast<uint8_t>(stable ^ bit);
-                changed = static_cast<uint8_t>(changed | bit);
-            }
-        }
-        return changed;
-    }
-};
-
 InputDebounce g_inputs;
 Debounce g_button;
 uint8_t g_statusDirty = 0;  // output status objects to send
+uint8_t g_learn[kChannels]{};  // scene slots to learn, per output (OutputChannel::scene)
 
-// Calls fn(std::integral_constant<unsigned, i>) for a run-time channel index.
-template <typename Fn, unsigned... I>
-void withChannel(unsigned channel, Fn&& fn, std::integer_sequence<unsigned, I...>) {
-    ((channel == I ? (fn(std::integral_constant<unsigned, I>{}), 0) : 0), ...);
-}
-template <typename Fn>
-void withChannel(unsigned channel, Fn&& fn) {
-    withChannel(channel, std::forward<Fn>(fn), std::make_integer_sequence<unsigned, kChannels>{});
-}
+// Sending starts once the device is operational and its start delay is over.
+bool g_sending = false;
+uint32_t g_startedAt = 0;
 
 // ── Bus power ───────────────────────────────────────────────────────────────
 // The stack debounces SAVE (20 ms down, 200 ms up) and reports the link state;
 // its early warning arrives from the SAVE edge interrupt, ahead of the
-// debounce. The interrupt releases every output and keeps what they were; the
-// main loop does the rest (followBusPower). It logs "pf <ms>" every
-// millisecond while SAVE stays asserted: the last line the host received is
-// the run time on the capacitors, to within the host's polling interval.
+// debounce. The interrupt releases every output; the main loop does the rest
+// (followBusPower) and keeps them released while SAVE is asserted. It logs
+// "pf <ms>" every millisecond while SAVE stays asserted: the last line the
+// host received is the run time on the capacitors, to within the host's
+// polling interval.
 
 volatile bool g_powerFailWarning = false;
 volatile uint32_t g_powerFailAtMs = 0u;
-volatile uint8_t g_outputsAtPowerFail = 0u;  // the pins as they were, active = 1
 bool g_saveAsserted = false;                  // the main loop's view
 
 void onPowerFailIsr(void*, uint64_t) {
-    if (!g_powerFailWarning) {
-        g_outputsAtPowerFail = board_outputs();
-        board_set_outputs(0u);
-    }
+    if (!g_powerFailWarning) board_set_outputs(0u);
     g_powerFailAtMs = board_millis();
     g_powerFailWarning = true;
 }
 
-// `on` is the value of the switch object; the operating mode decides what the
-// pin does with it.
-void setOutput(unsigned channel, bool on) {
-    const uint8_t bit = static_cast<uint8_t>(1u << channel);
-    if ((g_config.outputEnabled & bit) == 0u) {
-        rlog() << "DO" << channel + 1u << " is disabled";
-        return;
+// Drives the pins from the logic (operating mode applied) and notes the
+// status objects that are due. A disabled output stays released.
+void applyOutputs() {
+    uint8_t pins = 0;
+    for (unsigned ch = 0; ch < kChannels; ++ch) {
+        const uint8_t bit = static_cast<uint8_t>(1u << ch);
+        if (g_out[ch].takeStatus()) g_statusDirty = static_cast<uint8_t>(g_statusDirty | bit);
+        if ((g_config.outputEnabled & bit) == 0u) continue;
+        if (g_out[ch].on() != ((g_config.outputNormallyClosed & bit) != 0u)) pins = static_cast<uint8_t>(pins | bit);
     }
-    if (g_saveAsserted || g_powerFailWarning) {
-        rlog() << "DO" << channel + 1u << " not switched: bus power failing";
-        return;
-    }
-    const bool energise = on != ((g_config.outputNormallyClosed & bit) != 0u);
-    uint8_t mask = board_outputs();
-    mask = energise ? static_cast<uint8_t>(mask | bit) : static_cast<uint8_t>(mask & ~bit);
-    board_set_outputs(mask);
-    g_statusDirty = static_cast<uint8_t>(g_statusDirty | bit);
-    rlog() << "DO" << channel + 1u << (on ? " on" : " off") << (energise ? ", energised" : ", released");
+    if (g_saveAsserted || g_powerFailWarning) return;  // released until the bus is back
+    const uint8_t was = board_outputs();
+    if (pins == was) return;
+    board_set_outputs(pins);
+    Line line = rlog();
+    line << "DO ";
+    line.bits(pins);
 }
 
 // ── Output states across a restart ──────────────────────────────────────────
@@ -398,12 +424,16 @@ uint8_t g_storedOutputs = 0u;
 bool g_storedOutputsKnown = false;
 bool g_factoryReset = false;  // the restart that follows must not store them again
 
-// The switch values of the enabled outputs, for a given state of the pins.
-uint8_t switchValues(uint8_t pins) {
-    return static_cast<uint8_t>((pins ^ g_config.outputNormallyClosed) & g_config.outputEnabled);
+uint8_t switchValues() {
+    uint8_t values = 0;
+    for (unsigned ch = 0; ch < kChannels; ++ch) {
+        if (g_out[ch].switchValue()) values = static_cast<uint8_t>(values | (1u << ch));
+    }
+    return static_cast<uint8_t>(values & g_config.outputEnabled);
 }
 
-void storeOutputs(uint8_t values, const char* why) {
+void storeOutputs(const char* why) {
+    const uint8_t values = switchValues();
     if (g_factoryReset || (g_storedOutputsKnown && values == g_storedOutputs)) return;
     const uint8_t record[1] = {values};
     if (const auto saved = g_flashLog.save(kOutputStateKey, record); saved.isError()) {
@@ -417,33 +447,248 @@ void storeOutputs(uint8_t values, const char* why) {
     line.bits(values);
 }
 
-// At start, before the heap is locked: load() allocates.
-void restoreOutputs() {
+// At start, before the heap is locked: load() allocates. An output that is
+// not restored starts released; one in "normally closed" mode with the Switch
+// function therefore stands at on, as it always has, without a status.
+void restoreOutputs(uint32_t now) {
     std::vector<uint8_t> record;
-    if (g_flashLog.load(kOutputStateKey, record).isError() || record.size() != 1u) return;
-    g_storedOutputs = record[0];
-    g_storedOutputsKnown = true;
+    if (g_flashLog.load(kOutputStateKey, record).isOk() && record.size() == 1u) {
+        g_storedOutputs = record[0];
+        g_storedOutputsKnown = true;
+    }
     for (unsigned ch = 0; ch < kChannels; ++ch) {
         const uint8_t bit = static_cast<uint8_t>(1u << ch);
-        if ((g_config.restoreAtStart & g_config.outputEnabled & bit) != 0u) {
-            setOutput(ch, (g_storedOutputs & bit) != 0u);
+        if ((g_config.outputEnabled & bit) == 0u) continue;
+        if ((g_config.restoreAtStart & bit) != 0u) {
+            if (g_storedOutputsKnown) g_out[ch].command((g_storedOutputs & bit) != 0u, now);
+        } else if ((g_config.outputNormallyClosed & bit) != 0u &&
+                   g_out[ch].config().function == OutputFunction::Switch) {
+            g_out[ch].command(true, now);
+            (void)g_out[ch].takeStatus();
         }
     }
 }
 
+// ── Counters across a restart ───────────────────────────────────────────────
+// Stored when SAVE warns, before a planned restart, and every 15 minutes
+// while a count changed (docs/design/channel-functions.md §3.6).
+
+#if H8I8O_INPUT_COUNTER
+constexpr uint32_t kCounterSaveMs = 15u * 60u * 1000u;
+uint32_t g_storedPulses[kChannels]{};
+uint32_t g_countersSavedAt = 0;
+
+void storeCounters(const char* why) {
+    if (g_factoryReset) return;
+    bool changed = false;
+    uint8_t record[kChannels * 4u];
+    for (unsigned ch = 0; ch < kChannels; ++ch) {
+        storeU32(&record[ch * 4u], g_in[ch].pulses());
+        changed = changed || g_in[ch].pulses() != g_storedPulses[ch];
+    }
+    if (!changed) return;
+    if (const auto saved = g_flashLog.save(kCounterKey, record); saved.isError()) {
+        rlog() << "counters not stored (" << why << "): " << static_cast<uint32_t>(saved.error());
+        return;
+    }
+    for (unsigned ch = 0; ch < kChannels; ++ch) g_storedPulses[ch] = g_in[ch].pulses();
+    rlog() << "counters stored (" << why << ")";
+}
+
+void restoreCounters() {
+    std::vector<uint8_t> record;
+    if (g_flashLog.load(kCounterKey, record).isError() || record.size() != kChannels * 4u) return;
+    for (unsigned ch = 0; ch < kChannels; ++ch) {
+        g_storedPulses[ch] = loadU32(&record[ch * 4u]);
+        g_in[ch].restorePulses(g_storedPulses[ch]);
+    }
+}
+#else
+void storeCounters(const char*) {}
+void restoreCounters() {}
+#endif
+
 void restartDevice(const char* why) {
-    // While SAVE has the outputs released, what they were is what counts.
-    storeOutputs(switchValues(g_powerFailWarning ? g_outputsAtPowerFail : board_outputs()), why);
+    storeOutputs(why);
+    storeCounters(why);
     board_restart();
 }
 
+// ── Object bindings ─────────────────────────────────────────────────────────
+// The handlers run from app.loop(). They only feed the logic; what it sends
+// and switches is picked up by the loop.
+
 using Bindings = CommissionedBindingsBuilder<std::remove_cvref_t<decltype(kProduct)>, kDefaultBindingCapacity>;
+
+#if H8I8O_OUTPUT_V
+[[gnu::noinline]] void onOutputV(unsigned ch, uint8_t value) {
+    const uint32_t now = board_millis();
+    if (g_out[ch].config().function == OutputFunction::Valve) {
+        g_out[ch].controlValue(value, now);
+    } else {
+        g_learn[ch] = static_cast<uint8_t>(g_learn[ch] | g_out[ch].scene(value, now));
+    }
+}
+#endif
+
+[[gnu::noinline]] void onCentral(bool on) {
+    const uint32_t now = board_millis();
+    for (unsigned ch = 0; ch < kChannels; ++ch) {
+        if ((g_config.central & (1u << ch)) != 0u) g_out[ch].command(on, now);
+    }
+}
+
+// One handler type per kind of object, capturing the channel: a binding keeps
+// a callable that small inside its entry, and the stack makes one thunk per
+// callable type, so the eight channels share it (instead of 8 × 10 thunks).
+auto inputWriteA(unsigned ch) { return [ch](bool value) { g_in[ch].writeA(value); }; }
+auto inputA(unsigned ch) { return [ch]() -> bool { return g_in[ch].a(); }; }
+auto inputLock(unsigned ch) { return [ch](bool locked) { g_in[ch].writeLock(locked); }; }
+#if H8I8O_INPUT_COUNTER
+auto inputWriteCount(unsigned ch) { return [ch](uint32_t units) { g_in[ch].writeCount(units); }; }
+auto inputCount(unsigned ch) { return [ch]() -> uint32_t { return g_in[ch].units(); }; }
+#endif
+auto outputSwitch(unsigned ch) { return [ch](bool on) { g_out[ch].command(on, board_millis()); }; }
+auto outputStatus(unsigned ch) { return [ch]() -> bool { return g_out[ch].on(); }; }
+auto outputLock(unsigned ch) { return [ch](bool locked) { g_out[ch].lock(locked, board_millis()); }; }
+#if H8I8O_OUTPUT_FORCED
+auto outputForced(unsigned ch) {
+    return [ch](knx::application::Dpt2Value value) { g_out[ch].forced(value.control, value.value, board_millis()); };
+}
+#endif
+#if H8I8O_OUTPUT_V
+auto outputV(unsigned ch) { return [ch](uint8_t value) { onOutputV(ch, value); }; }
+#endif
+
+template <unsigned I>
+void bindChannel(Bindings& bindings) {
+    bindings.template onStateWrite<inPort(I, InSlot::A)>(inputWriteA(I));
+    bindings.template provideState<inPort(I, InSlot::A)>(inputA(I));
+    bindings.template onCommand<inPort(I, InSlot::L)>(inputLock(I));
+#if H8I8O_INPUT_COUNTER
+    bindings.template onStateWrite<inPort(I, InSlot::E)>(inputWriteCount(I));
+    bindings.template provideState<inPort(I, InSlot::E)>(inputCount(I));
+#endif
+
+    bindings.template onCommand<outPort(I, OutSlot::S)>(outputSwitch(I));
+    bindings.template provideState<outPort(I, OutSlot::T)>(outputStatus(I));
+    bindings.template onCommand<outPort(I, OutSlot::K)>(outputLock(I));
+#if H8I8O_OUTPUT_FORCED
+    bindings.template onCommand<outPort(I, OutSlot::F)>(outputForced(I));
+#endif
+#if H8I8O_OUTPUT_V
+    bindings.template onCommand<outPort(I, OutSlot::V)>(outputV(I));
+#endif
+}
 
 template <unsigned... I>
 void bindChannels(Bindings& bindings, std::integer_sequence<unsigned, I...>) {
-    (bindings.template onCommand<outputPort(I)>([](bool on) { setOutput(I, on); }), ...);
-    (bindings.template provideState<inputPort(I)>([]() -> bool { return (g_inputs.stable >> I) & 1u; }), ...);
-    (bindings.template provideState<statusPort(I)>([]() -> bool { return (logicalOutputs() >> I) & 1u; }), ...);
+    (bindChannel<I>(bindings), ...);
+    bindings.template onCommand<kCentralPort>([](bool on) { onCentral(on); });
+}
+
+// ── Telegrams from the logic ────────────────────────────────────────────────
+
+template <typename App>
+class BusSink final : public InputSink {
+public:
+    explicit BusSink(App& app) : _app(app) {}
+
+    void send(uint8_t channel, InObject object, uint32_t value) override {
+        if (!g_sending) return;  // the logic keeps its state; nothing is sent yet
+        knx::util::Result<void> result = knx::util::Result<void>::ok();
+        switch (object) {
+            case InObject::A:
+                result = _app.publish(inPort(channel, InSlot::A), value != 0u);
+                break;
+            case InObject::B:
+                result = _app.publish(inPort(channel, InSlot::B), value != 0u);
+                break;
+#if H8I8O_INPUT_DIMMING
+            case InObject::C:
+                result = _app.publish(inPort(channel, InSlot::C),
+                                      knx::application::Dpt3Value{(value & 0x8u) != 0u,
+                                                                  static_cast<uint8_t>(value & 0x7u)});
+                break;
+#endif
+#if H8I8O_INPUT_VALUE
+            case InObject::D:
+                result = _app.publish(inPort(channel, InSlot::D), static_cast<uint8_t>(value));
+                break;
+#endif
+#if H8I8O_INPUT_COUNTER
+            case InObject::E:
+                result = _app.publish(inPort(channel, InSlot::E), value);
+                break;
+#endif
+            default:
+                break;
+        }
+        if (result.isError()) rlog() << "DI" << channel + 1u << " not sent: " << static_cast<uint32_t>(result.error());
+    }
+
+private:
+    App& _app;
+};
+
+// Cyclic sending, the heartbeat and the rate limit, from the parameters. Each
+// object that can send cyclically got its policy slot at start (the slot
+// allocates); this only changes the settings.
+template <typename App>
+void applyPolicies(App& app) {
+    const auto cyclic = [&](Port port, uint32_t seconds) {
+        application::GroupObjectTransmitPolicy policy{};
+        policy.cyclicIntervalMs = seconds * 1000u;
+        (void)app.setTransmitPolicy(port, policy);
+    };
+    for (unsigned ch = 0; ch < kChannels; ++ch) {
+        const InputFunction function = g_in[ch].config().function;
+        cyclic(inPort(ch, InSlot::A), function == InputFunction::Switch ? g_config.cyclicS[ch] : 0u);
+#if H8I8O_INPUT_COUNTER
+        cyclic(inPort(ch, InSlot::E), function == InputFunction::Counter ? g_config.cyclicS[ch] : 0u);
+#endif
+    }
+    cyclic(kInOperationPort, g_config.heartbeatS);
+    application::TelegramRateLimitConfig limit{};
+    limit.maxTelegrams = g_config.rateLimit;
+    app.setTelegramRateLimit(limit);
+}
+
+// Allocates the policy slot of every object that can send cyclically: a
+// non-inert policy does, so it must happen before the heap is locked.
+template <typename App>
+void reservePolicies(App& app) {
+    application::GroupObjectTransmitPolicy reserve{};
+    reserve.cyclicIntervalMs = 0xFFFFFFFFu;
+    for (unsigned ch = 0; ch < kChannels; ++ch) {
+        (void)app.setTransmitPolicy(inPort(ch, InSlot::A), reserve);
+#if H8I8O_INPUT_COUNTER
+        (void)app.setTransmitPolicy(inPort(ch, InSlot::E), reserve);
+#endif
+    }
+    (void)app.setTransmitPolicy(kInOperationPort, reserve);
+    applyPolicies(app);
+}
+
+// Writes the learned scenes: the action of each slot a store asked for
+// becomes the output's state now.
+template <typename App>
+void learnScenes(App& app) {
+#if H8I8O_OUTPUT_SCENES
+    for (unsigned ch = 0; ch < kChannels; ++ch) {
+        const uint8_t slots = g_learn[ch];
+        if (slots == 0u) continue;
+        g_learn[ch] = 0u;
+        const bool on = g_out[ch].on();
+        if ((slots & 1u) != 0u) (void)app.template setParameter<Out::Scene1On>(ch, on);
+        if ((slots & 2u) != 0u) (void)app.template setParameter<Out::Scene2On>(ch, on);
+        if ((slots & 4u) != 0u) (void)app.template setParameter<Out::Scene3On>(ch, on);
+        if ((slots & 8u) != 0u) (void)app.template setParameter<Out::Scene4On>(ch, on);
+        rlog() << "DO" << ch + 1u << " scene learned: " << (on ? "on" : "off");
+    }
+#else
+    (void)app;
+#endif
 }
 
 const char* lifecycleText(DeviceLifecycleState state) {
@@ -539,6 +784,7 @@ TraceBurst g_burst;
     rlog() << what << (address >> 12) << "." << ((address >> 8) & 0xFu) << "." << (address & 0xFFu);
 }
 
+#ifdef CONFIG_H8I8O_BUS_TEST
 // Bus test generator. Sends A_DeviceDescriptor_Read (connectionless) to one
 // device, `count` times, `gap` ms apart, each send waiting for the TP-UART2's
 // confirmation. With gap 0 the next request leaves while the target is still
@@ -627,6 +873,45 @@ template <typename App>
     }
 }
 
+// Collects a b command; true while one is being typed (the character is taken).
+bool collectBurstCommand(int c) {
+    if (g_command.collecting) {
+        if (c == ';') {
+            g_command.collecting = false;
+            g_command.text[g_command.length] = '\0';
+            if (parseBurst(g_command.text, g_busTest)) {
+                g_busTest.active = true;
+                Line line = rlog();
+                line << "burst to " << (g_busTest.target >> 12) << "." << ((g_busTest.target >> 8) & 0xFu) << "."
+                     << (g_busTest.target & 0xFFu) << ": " << g_busTest.total << " requests, gap " << g_busTest.gapMs
+                     << " ms";
+            } else {
+                rlog() << "usage: b<area>.<line>.<device>,<count>,<gap ms>;";
+            }
+        } else if (g_command.length + 1u < sizeof(g_command.text)) {
+            g_command.text[g_command.length++] = static_cast<char>(c);
+        } else {
+            g_command.collecting = false;
+            rlog() << "usage: b<area>.<line>.<device>,<count>,<gap ms>;";
+        }
+        return true;
+    }
+    if (c == 'b') {
+        g_command = CommandLine{};
+        g_command.collecting = true;
+        return true;
+    }
+    if (c == 'x') {
+        if (g_busTest.active) {
+            g_busTest.active = false;
+            printBurst("burst stopped ");
+        }
+        return true;
+    }
+    return false;
+}
+#endif  // CONFIG_H8I8O_BUS_TEST
+
 // ── Bus power, continued ────────────────────────────────────────────────────
 
 uint32_t g_saveSince = 0u;
@@ -639,7 +924,8 @@ void followBusPower(const knx::physical::TpUartMediumBackend& backend, App& app,
         g_saveSince = g_powerFailAtMs;
         board_set_outputs(0u);  // again: a switch the loop was making may have undone the interrupt's
         rlog() << "power fail warning (SAVE edge), outputs released";
-        storeOutputs(switchValues(g_outputsAtPowerFail), "power fail");
+        storeOutputs("power fail");
+        storeCounters("power fail");
         app.requestPowerFailSave();  // the stack's own state (Data Secure sequence numbers)
     }
     const bool failing = board_bus_power_failing();
@@ -648,15 +934,11 @@ void followBusPower(const knx::physical::TpUartMediumBackend& backend, App& app,
         g_saveSince = now;
         rlog() << "SAVE asserted";
     } else if (!failing && g_saveAsserted) {
+        // The bus came back before the supply gave out: the outputs follow
+        // the logic again (applyOutputs).
         g_saveAsserted = false;
-        if (g_powerFailWarning) {
-            // The bus came back before the supply gave out.
-            board_set_outputs(g_outputsAtPowerFail);
-            g_powerFailWarning = false;
-            rlog() << "SAVE released, outputs back";
-        } else {
-            rlog() << "SAVE released";
-        }
+        g_powerFailWarning = false;
+        rlog() << "SAVE released";
     } else if (failing) {
         rlog() << "pf " << (now - g_saveSince);
     }
@@ -696,6 +978,7 @@ void followButton(App& app, uint32_t now) {
         rlog() << "factory reset";
         g_buttonState.armed = false;
         (void)g_flashLog.erase(kOutputStateKey);
+        (void)g_flashLog.erase(kCounterKey);
         g_factoryReset = true;
         const auto reset = app.factoryReset();  // restarts the device when it succeeds
         g_factoryReset = false;
@@ -726,6 +1009,7 @@ void followButton(App& app, uint32_t now) {
 }
 
 // ── Start-up and main loop ──────────────────────────────────────────────────
+#if KNX_SECURE_ENABLED
 // The device certificate: what ETS asks for when a secure device is added to
 // a project (serial number and FDSK). Printed at every start and by the k
 // command, on the debug probe's channel: the only one the board has besides
@@ -744,6 +1028,7 @@ template <typename App>
     rlog() << "data secure " << (app.isSecurityEnabled() ? "on" : "off") << ", tool key "
            << (app.toolKeyInForceIs(g_fdsk) ? "FDSK" : "from ETS (the FDSK is back after a factory reset)");
 }
+#endif
 
 // Start-up runs once, in a frame of its own (startDevice), so its locals (the
 // bindings being built, the start result) are gone before the loop starts.
@@ -773,11 +1058,15 @@ using Backend = knx::physical::TpUartMediumBackend;
     }
     knx::objects::setPersistenceFactory(&makePersistence);
 
+#if KNX_SECURE_ENABLED
     seedRandom();
     loadOrMakeFdsk();
+#endif
 
     knx::platform::CooperativeHooks hooks{};
+#if KNX_SECURE_ENABLED
     hooks.randomBytes = &hookRandom;
+#endif
     hooks.millis = &hookMillis;
     hooks.micros = &hookMicros;
     hooks.idle = &hookIdle;
@@ -793,12 +1082,13 @@ using Backend = knx::physical::TpUartMediumBackend;
     backend->setPowerFailIsrHandler(&onPowerFailIsr, nullptr);
 
     g_inputs.lastRaw = board_read_input_levels();
+    for (unsigned ch = 0; ch < kChannels; ++ch) g_in[ch].setIndex(static_cast<uint8_t>(ch));
 
     auto bindings = makeCommissionedBindings(kProduct);
     bindChannels(bindings, std::make_integer_sequence<unsigned, kChannels>{});
     bindings.onParametersChanged([](params::ViewFor<kParameters> parameters) {
         loadConfig(parameters);
-        rlog() << "parameters downloaded";
+        rlog() << "parameters changed";
     });
     bindings.onLifecycleChanged([](DeviceLifecycleState state) {
         board_set_led(state == DeviceLifecycleState::Commissioning);
@@ -806,9 +1096,11 @@ using Backend = knx::physical::TpUartMediumBackend;
     });
     CommissionedProductOptions options{};
     options.mediumBackend = std::unique_ptr<knx::physical::Tp1MediumBackend>(backend);
+#if KNX_SECURE_ENABLED
     // A factory default: in force until ETS installs its own Tool Key, and
     // again after a factory reset. Security Mode stays ETS's to switch on.
     options.secure.factoryToolKey = g_fdsk;
+#endif
     auto started = startCommissionedProduct(platform, kProduct, std::move(bindings), std::move(options));
     if (started.isError()) {
         rlog() << "start failed: " << static_cast<uint32_t>(started.error());
@@ -820,10 +1112,15 @@ using Backend = knx::physical::TpUartMediumBackend;
     auto app = std::move(started.value());
     // The stack's own clock. Without it the coalesced configuration save never
     // falls due, and a change that ends without a restart (an individual
-    // address, a property write) reaches flash only at the next restart.
+    // address, a property write) reaches flash only at the next restart; nor
+    // do cyclic sending and the rate limit work.
     app->setTimeSource([]() -> uint32_t { return board_millis(); });
     loadConfig(app->parameters());
-    restoreOutputs();
+    const uint32_t now = board_millis();
+    restoreOutputs(now);
+    restoreCounters();
+    reservePolicies(*app);
+    g_policiesDue = false;
     g_inputs.stable = g_inputs.candidate = readLogicalInputs();
     g_flashLog.setEraseGuard(backend);
     knx::heap::lock();
@@ -835,15 +1132,41 @@ using Backend = knx::physical::TpUartMediumBackend;
              << ", heap " << static_cast<uint32_t>(g_heap_high_water)
              << (app->parametersLoaded() ? ", parameters loaded" : ", parameters NOT loaded (defaults)");
     }
+#if KNX_SECURE_ENABLED
     printCertificate(*app);
+#endif
+    g_startedAt = board_millis();
     backendOut = backend;
     return app;
 }
 
-// Once a millisecond: bus power, the inputs, the programming button.
+// Sending starts once the device is operational and its start delay is over:
+// then, once per start, the inputs that send after a start do, and "in
+// operation" starts. Programming mode stops sending; leaving it resumes
+// without repeating those.
+bool g_startSendsDone = false;
+
 template <typename App>
-[[gnu::noinline]] void serviceTick(App& app, const Backend& backend, uint32_t now) {
+[[gnu::noinline]] void followSending(App& app, BusSink<App>& sink, uint32_t now) {
+    const bool operational = app.lifecycleState() == DeviceLifecycleState::Operational;
+    if (!operational) {
+        g_sending = false;
+        return;
+    }
+    if (g_sending || now - g_startedAt < static_cast<uint32_t>(g_config.startDelayS) * 1000u) return;
+    g_sending = true;
+    rlog() << "sending";
+    if (g_startSendsDone) return;
+    g_startSendsDone = true;
+    for (unsigned ch = 0; ch < kChannels; ++ch) g_in[ch].sendAfterStart(((g_inputs.stable >> ch) & 1u) != 0u, sink);
+    if (g_config.heartbeatS != 0u) (void)app.publish(kInOperationPort, true);
+}
+
+// Once a millisecond: bus power, the inputs, the channel logic, the button.
+template <typename App>
+[[gnu::noinline]] void serviceTick(App& app, const Backend& backend, BusSink<App>& sink, uint32_t now) {
     followBusPower(backend, app, now);
+    followSending(app, sink, now);
 
     const uint8_t levels = board_read_input_levels();
     if (levels != g_inputs.lastRaw) {
@@ -852,13 +1175,22 @@ template <typename App>
     }
     const uint8_t changed = g_inputs.update(readLogicalInputs(), now, g_config.debounceMs);
     for (unsigned ch = 0; ch < kChannels; ++ch) {
-        if ((changed & (1u << ch)) == 0u) continue;
-        const bool on = (g_inputs.stable >> ch) & 1u;
-        rlog() << "DI" << ch + 1u << (on ? " active" : " inactive");
-        if (app.lifecycleState() == DeviceLifecycleState::Operational) {
-            withChannel(ch, [&](auto c) { (void)app.template publish<inputPort(c)>(on); });
+        if ((changed & (1u << ch)) != 0u) {
+            const bool active = (g_inputs.stable >> ch) & 1u;
+            rlog() << "DI" << ch + 1u << (active ? " active" : " inactive");
+            g_in[ch].edge(active, now, sink);
         }
+        g_in[ch].tick(now, sink);
+        g_out[ch].tick(now);
     }
+    applyOutputs();
+
+#if H8I8O_INPUT_COUNTER
+    if (now - g_countersSavedAt >= kCounterSaveMs) {
+        g_countersSavedAt = now;
+        storeCounters("periodic");
+    }
+#endif
 
     followButton(app, now);
 }
@@ -871,10 +1203,7 @@ template <typename App>
             g_statusDirty = static_cast<uint8_t>(g_statusDirty & ~(1u << ch));
             continue;
         }
-        const bool on = (logicalOutputs() >> ch) & 1u;
-        bool sent = false;
-        withChannel(ch, [&](auto c) { sent = app.template publish<statusPort(c)>(on).isOk(); });
-        if (!sent) break;  // the send pipeline is full: next pass
+        if (!app.publish(outPort(ch, OutSlot::T), g_out[ch].on()).isOk()) break;  // the send pipeline is full: next pass
         g_statusDirty = static_cast<uint8_t>(g_statusDirty & ~(1u << ch));
     }
 }
@@ -882,36 +1211,10 @@ template <typename App>
 // The RTT command channel (the commands are listed at the top of this file).
 template <typename App>
 [[gnu::noinline]] void handleCommand(App& app, const Backend& backend, int c) {
-    if (g_command.collecting) {
-        if (c == ';') {
-            g_command.collecting = false;
-            g_command.text[g_command.length] = '\0';
-            if (parseBurst(g_command.text, g_busTest)) {
-                g_busTest.active = true;
-                Line line = rlog();
-                line << "burst to " << (g_busTest.target >> 12) << "." << ((g_busTest.target >> 8) & 0xFu) << "."
-                     << (g_busTest.target & 0xFFu) << ": " << g_busTest.total << " requests, gap " << g_busTest.gapMs
-                     << " ms";
-            } else {
-                rlog() << "usage: b<area>.<line>.<device>,<count>,<gap ms>;";
-            }
-        } else if (g_command.length + 1u < sizeof(g_command.text)) {
-            g_command.text[g_command.length++] = static_cast<char>(c);
-        } else {
-            g_command.collecting = false;
-            rlog() << "usage: b<area>.<line>.<device>,<count>,<gap ms>;";
-        }
-        return;
-    }
-    if (c == 'b') {
-        g_command = CommandLine{};
-        g_command.collecting = true;
-    } else if (c == 'x') {
-        if (g_busTest.active) {
-            g_busTest.active = false;
-            printBurst("burst stopped ");
-        }
-    } else if (c == 'p') {
+#ifdef CONFIG_H8I8O_BUS_TEST
+    if (collectBurstCommand(c)) return;
+#endif
+    if (c == 'p') {
         app.toggleProgrammingMode();
     } else if (c == 's') {
         printBackend(backend);
@@ -922,7 +1225,7 @@ template <typename App>
         line << " button " << (board_button_pressed() ? 1u : 0u);
     } else if (c >= '1' && c <= '8') {
         const unsigned ch = static_cast<unsigned>(c - '1');
-        setOutput(ch, ((logicalOutputs() >> ch) & 1u) == 0u);
+        g_out[ch].command(!g_out[ch].switchValue(), board_millis());
     } else if (c == 'a') {
         printAddress("address ", app.individualAddress().raw);
         {
@@ -939,8 +1242,10 @@ template <typename App>
 #else
         rlog() << "lifecycle: " << lifecycleText(app.lifecycleState());
 #endif
+#if KNX_SECURE_ENABLED
     } else if (c == 'k') {
         printCertificate(app);
+#endif
     } else if (c == 'R') {
         restartDevice("R");
     }
@@ -951,6 +1256,8 @@ template <typename App>
 int main() {
     Backend* backend = nullptr;
     auto app = startDevice(backend);
+    using App = std::remove_reference_t<decltype(*app)>;
+    BusSink<App> sink(*app);
     board_watchdog_start();
 
     uint32_t lastTick = board_millis();
@@ -965,13 +1272,20 @@ int main() {
             lastAddress = address;
             printAddress("address now ", address);
         }
+#ifdef CONFIG_H8I8O_BUS_TEST
         stepBurst(*app);
+#endif
+        if (g_policiesDue) {
+            g_policiesDue = false;
+            applyPolicies(*app);
+        }
+        learnScenes(*app);
 
         if (const uint32_t now = board_millis(); now != lastTick) {
             lastTick = now;
-            serviceTick(*app, *backend, now);
+            serviceTick(*app, *backend, sink, now);
         }
-        if (g_statusDirty != 0u && app->lifecycleState() == DeviceLifecycleState::Operational) {
+        if (g_statusDirty != 0u && g_sending) {
             publishStatus(*app);
         }
         if (const int c = rtt_read_char(); c >= 0) {
