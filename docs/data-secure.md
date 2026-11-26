@@ -41,8 +41,8 @@ still open.
 
 ## Commissioning with ETS6
 
-1. Build and import the product file of version 4
-   ([tools/knxprod/README.md](../tools/knxprod/README.md)).
+1. Build and import the product file
+   ([ets-product.md](ets-product.md)).
 2. Note the device certificate. `tools/scripts/flash.sh` prints it after programming and saves
    it as `h8i8o-<serial>.cert.txt`; write it on a label on the device, where a commercial
    device has its certificate printed. Later the RTT log shows it at every start (the line

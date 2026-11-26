@@ -18,17 +18,18 @@ How the firmware is built and how it runs. For what it does on the bus, see
 | `bsp/gd32_fmc.c` | The flash driver for persistence, as KNstaX's `knx_flash_hal_t` |
 | `bsp/rtt.c` | A minimal SEGGER RTT implementation: one channel out, one in |
 | `startup/` | Vector table, `Reset_Handler` (with the stack paint), newlib system calls, linker script |
-| `knx.defconfig` | KNstaX configuration on top of its profile: capacities and APDU length, for the firmware and the product file |
+| `knx.defconfig` | KNstaX configuration on top of its profile: capacities and APDU length |
+| `product.lock` | The application version and content of each variant's ETS product ([ets-product.md](ets-product.md)) |
 | `external/KNstaX` | The KNX stack, as a git submodule |
-| `tools/knxprod` | Host build of the ETS product file from `app/product.hpp` |
 
 Everything is register-level C and C++23; there is no vendor HAL. KNstaX is built with its
 `tp1-small` profile, `knx.defconfig` and the build variant on top: TP1 only, 64 group
 addresses, 96 associations, APDU length 55 (extended frames, which KNX Data Secure needs), and,
 in the `standard` variant, KNX Data Secure with the software AES and fixed key tables (64 group
 keys, 16 senders, 2 point-to-point keys), which brings in the extended memory services and the
-group object diagnostics ETS uses with a secure device. The product file is built with the
-same `knx.defconfig` and variant, so it declares what the firmware implements;
+group object diagnostics ETS uses with a secure device. The firmware build also builds the
+product file, on the host with this configuration, so it declares what the firmware
+implements ([ets-product.md](ets-product.md));
 [data-secure.md](data-secure.md) describes the Data Secure part.
 
 ### Build variants
@@ -44,8 +45,8 @@ has both halves checked by Kconfig, so a misspelt option fails the configure ste
 | `standard` (default) | yes | see the file and [the design](design/channel-functions.md#9-result) | number 1, "H8i8o 8 inputs 8 outputs" |
 | `extended` | no | all | number 2, "H8i8o 8 inputs 8 outputs, extended" |
 
-Choose one with `-DH8I8O_VARIANT=<name>`, or `-DH8I8O_VARIANT=<path>` for a file of your own.
-Build the product file with the same variant. Each variant is its own application program
+Choose one with `-DH8I8O_VARIANT=<name>`, or `-DH8I8O_VARIANT=<path>` for a file of your own;
+the build writes the product file of that variant, `h8i8o_<name>`. Each variant is its own application program
 and catalogue product: moving a device from one to the other means flashing the other image
 and replacing the device in the ETS project.
 
@@ -308,7 +309,8 @@ Programming mode ends by itself after 15 minutes, however it was turned on.
   - raise `applicationVersion`, so that ETS sees a new application program;
   - raise `PersistencePolicy::schemaVersion` when ports are added, removed or reordered,
     because the stored object layout is positional;
-  - rebuild the product file of every variant ([tools/knxprod/README.md](../tools/knxprod/README.md)).
+  - build every variant and commit `product.lock`; a build whose product changed without a
+    new version fails ([ets-product.md](ets-product.md#when-the-product-changes)).
 - **A function** lives in `app/logic` with its host tests in `test/`; `app/main.cpp` only
   decodes its parameters and binds its objects. A function that not every variant can carry
   gets a `CONFIG_H8I8O_*` option in `Kconfig`.

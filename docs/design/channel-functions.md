@@ -353,7 +353,7 @@ are stored.
 | 3 Logic | `app/logic`: `InputChannel`, `OutputChannel`, debounce; `test/`: 62 host tests (30 input, 28 output, 4 debounce) |
 | 4 Product | Slots, 3 parameter blocks, object views; application version 5, schema version 2 |
 | 5, 6 Glue | `app/main.cpp` rewritten around the logic |
-| 7 Docs | docs/application.md, firmware.md, data-secure.md, README, tools/knxprod/README.md |
+| 7 Docs | docs/application.md, firmware.md, data-secure.md, README, docs/ets-product.md |
 
 ### 9.2 Size
 

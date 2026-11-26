@@ -4,7 +4,7 @@
  * @brief H8i8o product: 8 inputs and 8 outputs, each with a function
  *
  * The single source of truth for the firmware and the ETS product file
- * (tools/knxprod). No hardware or OS dependencies here.
+ * (docs/ets-product.md). No hardware or OS dependencies here.
  *
  * docs/design/channel-functions.md is the design; docs/application.md
  * describes the result for ETS users. In short:

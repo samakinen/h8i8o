@@ -1,0 +1,12 @@
+{
+  "h8i8o_extended": {
+    "application": "M-00FA_A-0002",
+    "content": "sha256:45cd3914d761ade799c0194baefe0789e640177c75f479d7bbb0c5aa440d497b",
+    "version": 5
+  },
+  "h8i8o_standard": {
+    "application": "M-00FA_A-0001",
+    "content": "sha256:9baf00df0e9188fcdd15121e0ef267670aaac39fb469b3f47eac05ae4bf80b36",
+    "version": 5
+  }
+}

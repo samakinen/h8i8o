@@ -225,7 +225,7 @@ The **central switch** object (1.001) switches every output set to follow it.
 ## Commissioning with ETS6
 
 1. Build the firmware and the product file of the same variant; sign and import the product
-   file ([tools/knxprod/README.md](../tools/knxprod/README.md)).
+   file ([ets-product.md](ets-product.md)).
 2. Add the product ("H8i8o 8 inputs 8 outputs", or the extended one) to the project and set
    its individual address.
 3. Program the individual address: press the programming button once when ETS asks.

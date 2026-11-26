@@ -71,9 +71,9 @@ group telegrams. Before you use it, note that:
 | `test/` | Host tests of the channel functions |
 | `bsp/`, `startup/` | Board support, start-up code and linker script |
 | `external/KNstaX/` | The KNX stack (git submodule) |
-| `docs/` | [Application](docs/application.md), [hardware](docs/hardware.md), [firmware internals](docs/firmware.md) |
-| `tools/docker/` | Toolchain images for the firmware and the ETS product file |
-| `tools/knxprod/` | Build of the ETS product file |
+| `docs/` | [Application](docs/application.md), [hardware](docs/hardware.md), [firmware internals](docs/firmware.md), [ETS product file](docs/ets-product.md) |
+| `tools/docker/` | Toolchain image for the firmware and its ETS product file |
+| `product.lock` | Application version and content of each variant's ETS product |
 | `tools/scripts/` | Flashing and RTT console scripts |
 | `tools/swd-probe/` | Settings for using an ESP32-S2 board as the SWD probe |
 
@@ -95,7 +95,7 @@ new submodule commit.
 - An SWD probe that OpenOCD supports, and OpenOCD 0.12 or later. Tested with an ESP32-S2
   running esp-usb-bridge as a CMSIS-DAP probe ([tools/swd-probe](tools/swd-probe/README.md)).
 - Docker, for the toolchains.
-- ETS6, and OpenKNXproducer or Kaenx-Creator to sign the product file.
+- ETS6, and OpenKNXproducer (or Kaenx-Creator) to sign the product file.
 - Python 3, for the helper scripts.
 
 ## Build the firmware
@@ -115,12 +115,13 @@ docker run --rm -v "$PWD":/work -w /work h8i8o-arm sh -c \
 ```
 
 On Git Bash for Windows, prefix `docker run` with `MSYS_NO_PATHCONV=1`. The result is
-`build/fw/h8i8o.elf` (and `h8i8o.bin`, to be written at `0x08000000`).
+`build/fw/h8i8o.elf` (and `h8i8o.bin`, to be written at `0x08000000`), and the ETS product
+file of the same variant, `build/fw/h8i8o_standard.knxprod.xml`, with everything collected in
+`build/fw/dist/h8i8o_standard/` ([docs/ets-product.md](docs/ets-product.md)).
 
 That builds the `standard` variant, with KNX Data Secure. For the `extended` one (every
 function, no Data Secure) add `-DH8I8O_VARIANT=extended`, preferably into another build
-directory, and build the product file with the same variant
-([docs/firmware.md](docs/firmware.md#build-variants)).
+directory ([docs/firmware.md](docs/firmware.md#build-variants)).
 
 Add `-DH8I8O_TRACE=ON` to the first `cmake` for the host link trace: every octet between the
 MCU and the TP-UART2 in the RTT log, for diagnosing an ETS download. It costs about 3 KiB of
@@ -184,7 +185,7 @@ The log starts with `h8i8o start` and `started, address …`.
 
 ## Commission with ETS6
 
-1. Build and sign the product file: [tools/knxprod/README.md](tools/knxprod/README.md).
+1. Sign the product file the build wrote: [docs/ets-product.md](docs/ets-product.md#pack-and-sign).
 2. Import it into ETS6 and add "H8i8o 8 inputs 8 outputs" to the project.
 3. Program the individual address. Press the programming button **once** when ETS asks; the
    LED lights while programming mode is on.

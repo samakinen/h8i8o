@@ -1,8 +1,11 @@
-# Firmware toolchain: arm-none-eabi-gcc, CMake, Ninja.
+# Firmware toolchain: arm-none-eabi-gcc, CMake, Ninja; and the host compiler,
+# Python and git the build uses for the ETS product file (it runs KNstaX's
+# exporter on the host, validates the result and names the commits).
 #   docker build -t h8i8o-arm -f tools/docker/Dockerfile.arm tools/docker
 FROM ubuntu:24.04
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       gcc-arm-none-eabi libnewlib-arm-none-eabi libstdc++-arm-none-eabi-newlib \
-      cmake ninja-build make python3 ca-certificates \
+      cmake ninja-build make python3 python3-xmlschema ca-certificates \
+      g++ git \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /work

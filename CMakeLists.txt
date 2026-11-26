@@ -67,3 +67,22 @@ add_custom_command(TARGET h8i8o POST_BUILD
     COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:h8i8o> $<TARGET_FILE_DIR:h8i8o>/h8i8o.bin
     COMMAND arm-none-eabi-size $<TARGET_FILE:h8i8o>
 )
+
+# The ETS product of this variant, built on the host with the firmware's own
+# KNstaX configuration (KNstaX cmake/knx_ets_product.cmake): build/<dir>/
+# h8i8o_<variant>.knxprod.xml, .ets.xml (to pack on a PC with ETS) and
+# .json, and build/<dir>/dist/h8i8o_<variant>/ with the firmware and a
+# manifest. product.lock records each variant's application version: a
+# product that changes without a new version fails the build.
+include(${KNSTAX_DIR}/cmake/knx_ets_product.cmake)
+get_filename_component(_h8i8o_variant_name "${H8I8O_VARIANT_FILE}" NAME_WE)
+knx_ets_product(h8i8o_${_h8i8o_variant_name}
+    DEFINITION ${CMAKE_CURRENT_LIST_DIR}/app/product.hpp
+    SYMBOL     h8i8o::kProduct
+    VIEWS      h8i8o::kObjectViews
+    INCLUDE_DIRECTORIES ${CMAKE_CURRENT_LIST_DIR}/app ${H8I8O_CONFIG_INCLUDE_DIR}
+    LOCK       ${CMAKE_CURRENT_LIST_DIR}/product.lock
+    DIST_DIR   ${CMAKE_BINARY_DIR}/dist
+    DIST_FILES ${CMAKE_BINARY_DIR}/h8i8o.elf ${CMAKE_BINARY_DIR}/h8i8o.bin
+    DIST_DEPENDS h8i8o
+)
